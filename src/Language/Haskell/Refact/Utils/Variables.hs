@@ -1633,6 +1633,14 @@ hsVisibleDsRdr nm e t = do
     lanndecl (GHC.L _ (GHC.HsAnnotation _ _ expr)) = hsVisibleDsRdr nm e expr
     -- -----------------------
 
+    -- If you are hitting this error then there is probably a case missing in
+    -- the above code. To have a go at fixing this error:
+    --
+    -- - Find the unhandled type here
+    --   https://hackage.haskell.org/package/ghc-8.2.1/docs/HsDecls.html
+    -- - Write a function which transforms this type into a 'RefactGhc
+    --   DeclaredNames'. (Remember that this type will be wrapped in 'Located')
+    -- - Add this function to the `SYB.extQ` chain above.
     err = error $ "hsVisibleDsRdr nm:no match for:" ++ (SYB.showData SYB.Parser 0 t)
 
 -- ---------------------------------------------------------------------
