@@ -4,15 +4,15 @@ module Language.Haskell.Refact.Refactoring.DeleteDef
   (deleteDef, compDeleteDef) where
 
 import qualified Data.Generics as SYB
-import qualified GHC.SYB.Utils as SYB
-import BasicTypes
+-- import qualified GHC.SYB.Utils as SYB
+-- import BasicTypes
 import qualified GHC
 import Control.Monad
 import Control.Monad.State
-import GhcMod
+import GhcModCore
 import Language.Haskell.Refact.API
 import Data.Generics.Strafunski.StrategyLib.StrategyLib
-import qualified GhcMod       as GM
+import qualified GhcModCore   as GM
 import qualified GhcMod.Types as GM
 import System.Directory
 import Language.Haskell.GHC.ExactPrint
@@ -20,7 +20,7 @@ import Language.Haskell.GHC.ExactPrint.Types
 
 deleteDef :: RefactSettings -> GM.Options -> FilePath -> SimpPos -> IO [FilePath]
 deleteDef settings cradle fileName (row,col) = do
-  absFileName <- canonicalizePath fileName
+  absFileName <- normaliseFilePath fileName
   runRefacSession settings cradle (compDeleteDef absFileName (row,col))
 
 compDeleteDef ::FilePath -> SimpPos -> RefactGhc [ApplyRefacResult]
@@ -36,7 +36,7 @@ compDeleteDef fileName (row,col) = do
     Just pn@(GHC.L _ n) ->
       do
         logm $ "DeleteDef.comp: before isPNUsed"
-        Just ghcn <- locToNameRdr (row,col) parsed
+        Just ghcn <- locToName (row,col) parsed
         pnIsUsedLocal <- isPNUsed ghcn targetModule fileName
         clients <- clientModsAndFiles targetModule
         pnUsedClients <- isPNUsedInClients ghcn n targetModule
@@ -66,20 +66,19 @@ pnUsedInScope pn t' = do
   res <- applyTU (stop_tdTU (failTU `adhocTU` bind `adhocTU` var)) t'
   return $ (length res) > 0
     where
-#if __GLASGOW_HASKELL__ <= 710
-      bind ((GHC.FunBind (GHC.L l name) _ match _ _ _) :: GHC.HsBindLR GHC.Name GHC.Name)
-#else
-      bind ((GHC.FunBind (GHC.L l name)  match _ _ _) :: GHC.HsBindLR GHC.Name GHC.Name)
-#endif
+      bind ((GHC.FunBind { GHC.fun_id = (GHC.L l name) }) :: GHC.HsBindLR GhcRn GhcRn)
+      -- bind ((GHC.FunBind (GHC.L l name)  match _ _ _) :: GHC.HsBindLR GhcRn GhcRn)
         | name == pn = do
             logm $ "Found Binding at: " ++ (showGhc l)
             return []
       bind other = do
         mzero
-#if __GLASGOW_HASKELL__ <= 710
-      var ((GHC.HsVar name) :: GHC.HsExpr GHC.Name)
+#if __GLASGOW_HASKELL__ >= 806
+      var ((GHC.HsVar _ (GHC.L _ name)) :: GHC.HsExpr GhcRn)
+#elif __GLASGOW_HASKELL__ > 710
+      var ((GHC.HsVar (GHC.L _ name)) :: GHC.HsExpr GhcRn)
 #else
-      var ((GHC.HsVar (GHC.L _ name)) :: GHC.HsExpr GHC.Name)
+      var ((GHC.HsVar name) :: GHC.HsExpr GhcRn)
 #endif
         | name == pn = do
             logm $ "Found var"

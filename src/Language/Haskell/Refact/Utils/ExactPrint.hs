@@ -14,6 +14,7 @@ module Language.Haskell.Refact.Utils.ExactPrint
   , balanceAllComments
   , locate
   , addEmptyAnn
+  , addAnnValWithDP
   , addAnnVal
   , addAnn
   , zeroDP
@@ -23,6 +24,8 @@ module Language.Haskell.Refact.Utils.ExactPrint
   , synthesizeAnns
   , addNewKeyword
   , addNewKeywords
+  , copyAnnDP
+  , getDeltaPos
   ) where
 
 import qualified GHC           as GHC
@@ -135,13 +138,13 @@ balanceAllComments la
     inMod :: GHC.ParsedSource -> Transform (GHC.ParsedSource)
     inMod m = doBalance m
 
-    inExpr :: GHC.LHsExpr GHC.RdrName -> Transform (GHC.LHsExpr GHC.RdrName)
+    inExpr :: GHC.LHsExpr GhcPs -> Transform (GHC.LHsExpr GhcPs)
     inExpr e = doBalance e
 
-    inMatch :: (GHC.LMatch GHC.RdrName (GHC.LHsExpr GHC.RdrName)) -> Transform (GHC.LMatch GHC.RdrName (GHC.LHsExpr GHC.RdrName))
+    inMatch :: (GHC.LMatch GhcPs (GHC.LHsExpr GhcPs)) -> Transform (GHC.LMatch GhcPs (GHC.LHsExpr GhcPs))
     inMatch m = doBalance m
 
-    inStmt :: GHC.LStmt GHC.RdrName (GHC.LHsExpr GHC.RdrName) -> Transform (GHC.LStmt GHC.RdrName (GHC.LHsExpr GHC.RdrName))
+    inStmt :: GHC.LStmt GhcPs (GHC.LHsExpr GhcPs) -> Transform (GHC.LStmt GhcPs (GHC.LHsExpr GhcPs))
     inStmt s = doBalance s
 
     -- |Balance all comments between adjacent decls, as well as pushing all
@@ -182,29 +185,40 @@ locate ast = do
 
 --Adds an empty annotation at the provided location
 addEmptyAnn :: (SYB.Data a) => GHC.Located a -> RefactGhc ()
-addEmptyAnn a = addAnn a annNone
+addEmptyAnn a = liftT $ addAnn a annNone
+
+addAnnValWithDP :: (SYB.Data a) => GHC.Located a -> DeltaPos -> RefactGhc ()
+-- addAnnValWithDP a dp = addAnn a valAnn
+--     where valAnn = annNone {annEntryDelta = dp, annsDP = [(G GHC.AnnVal, DP (0,0))]}
+addAnnValWithDP a dp = liftT $ addSimpleAnnT a dp [(G GHC.AnnVal, DP (0,0))]
 
 --Adds an "AnnVal" annotation at the provided location
 addAnnVal :: (SYB.Data a) => GHC.Located a -> RefactGhc ()
-addAnnVal a = addAnn a valAnn
-  where valAnn = annNone {annEntryDelta = DP (0,1), annsDP = [(G GHC.AnnVal, DP (0,0))]}
+addAnnVal a = addAnnValWithDP a (DP (0,1))
 
---Adds the given annotation at the provided location
-addAnn :: (SYB.Data a) => GHC.Located a -> Annotation -> RefactGhc ()
+-- TODO:AZ use the standard API instead
+-- | Adds the given annotation at the provided location
+-- addAnn :: (SYB.Data a) => GHC.Located a -> Annotation -> RefactGhc ()
+addAnn :: (SYB.Data a) => GHC.Located a -> Annotation -> Transform ()
 addAnn a ann = do
-  currAnns <- fetchAnnsFinal
+  -- currAnns <- fetchAnnsFinal
+  -- let k = mkAnnKey a
+  -- setRefactAnns $ Map.insert k ann currAnns
   let k = mkAnnKey a
-  setRefactAnns $ Map.insert k ann currAnns
+  modifyAnnsT (\currAnns -> Map.insert k ann currAnns)
 
---Sets the entry delta position of an ast chunk
+
+-- TODO:AZ replace this with the ghc-exactprint one directly
+-- |Sets the entry delta position of an ast chunk
 setDP :: (SYB.Data a) => DeltaPos -> GHC.Located a -> RefactGhc ()
 setDP dp ast = do
-  currAnns <- fetchAnnsFinal
-  let k = mkAnnKey ast
-      mv = Map.lookup k currAnns
-  case mv of
-    Nothing -> return ()
-    Just v -> addAnn ast (v {annEntryDelta = dp})
+  liftT $ setEntryDPT ast dp
+  -- currAnns <- fetchAnnsFinal
+  -- let k = mkAnnKey ast
+  --     mv = Map.lookup k currAnns
+  -- case mv of
+  --   Nothing -> return ()
+  --   Just v -> addAnn ast (v {annEntryDelta = dp})
 
 --Resets the given AST chunk's delta position to zero.
 zeroDP :: (SYB.Data a) => GHC.Located a -> RefactGhc ()
@@ -277,3 +291,16 @@ addNewKeyword entry a = do
 
 addNewKeywords :: (SYB.Data a) => [(KeywordId, DeltaPos)] -> GHC.Located a -> RefactGhc ()
 addNewKeywords entries a = mapM_ ((flip addNewKeyword) a) entries
+
+getDeltaPos :: (SYB.Data a) => GHC.Located a -> Anns -> Maybe DeltaPos
+getDeltaPos a ans = Map.lookup (mkAnnKey a) ans >>= (\v -> return (annEntryDelta v))
+
+copyAnnDP :: (SYB.Data old,SYB.Data new)
+  => GHC.Located old -> GHC.Located new -> Anns -> Anns
+copyAnnDP old new ans =
+  case Map.lookup (mkAnnKey old) ans of
+    Nothing -> ans
+    Just v  -> Map.insert (mkAnnKey new) newAnn ans
+      where
+        dp = annEntryDelta v
+        newAnn = annNone {annEntryDelta = dp}

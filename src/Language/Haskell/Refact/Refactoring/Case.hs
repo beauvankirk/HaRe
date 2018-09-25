@@ -6,12 +6,11 @@ module Language.Haskell.Refact.Refactoring.Case
   ) where
 
 import qualified Data.Generics         as SYB
-import qualified GHC.SYB.Utils         as SYB
 
 import qualified BasicTypes    as GHC
 import qualified GHC           as GHC
 
-import qualified GhcMod as GM (Options(..))
+import qualified GhcModCore as GM (Options(..))
 import Language.Haskell.Refact.API
 
 -- To be moved into HaRe API
@@ -28,7 +27,7 @@ import qualified Data.Map as Map
 -- | Convert an if expression to a case expression
 ifToCase :: RefactSettings -> GM.Options -> FilePath -> SimpPos -> SimpPos -> IO [FilePath]
 ifToCase settings opts fileName beginPos endPos = do
-  absFileName <- canonicalizePath fileName
+  absFileName <- normaliseFilePath fileName
   runRefacSession settings opts (compIfToCase absFileName beginPos endPos)
 
 compIfToCase :: FilePath -> SimpPos -> SimpPos -> RefactGhc [ApplyRefacResult]
@@ -36,33 +35,33 @@ compIfToCase fileName beginPos endPos = do
        parseSourceFileGhc fileName
        parsed <- getRefactParsed
        oldAnns <- liftT getAnnsT
-       logm $ "Case.compIfToCase:parsed=" ++ (showAnnData oldAnns 0 parsed) -- ++AZ++
+       -- logm $ "Case.compIfToCase:parsed=" ++ (showAnnData oldAnns 0 parsed) -- ++AZ++
        let expr = locToExp beginPos endPos parsed
        case expr of
-         Just exp1@(GHC.L _ (GHC.HsIf _ _ _ _))
+         Just exp1@(GHC.L _ (GHC.HsIf {}))
                 -> do (refactoredMod,_) <- applyRefac (doIfToCaseInternal exp1) RSAlreadyLoaded
                       return [refactoredMod]
-         _      -> error $ "You haven't selected an if-then-else  expression!" -- (show (beginPos,endPos,fileName)) ++ "]:" ++ (SYB.showData SYB.Parser 0 $ ast)
+         _      -> error $ "You haven't selected an if-then-else  expression!" -- (show (beginPos,endPos,fileName)) ++ "]:" ++ (showAnnData mempty 0 $ ast)
 
 doIfToCaseInternal ::
-  GHC.Located (GHC.HsExpr GHC.RdrName)
+  GHC.Located (GHC.HsExpr GhcPs)
   -> RefactGhc ()
 doIfToCaseInternal expr = do
   rs <- getRefactParsed
   reallyDoIfToCase expr rs
 
 reallyDoIfToCase ::
-  GHC.Located (GHC.HsExpr GHC.RdrName)
+  GHC.Located (GHC.HsExpr GhcPs)
   -> GHC.ParsedSource
   -> RefactGhc ()
 reallyDoIfToCase expr p = do
 
-   p2 <- SYB.everywhereMStaged SYB.Parser (SYB.mkM inExp) p
+   p2 <- SYB.everywhereM (SYB.mkM inExp) p
    putRefactParsed p2 mempty
    return ()
        where
-         inExp :: (GHC.Located (GHC.HsExpr GHC.RdrName)) -> RefactGhc (GHC.Located (GHC.HsExpr GHC.RdrName))
-         inExp exp1@(GHC.L _ (GHC.HsIf _se (GHC.L _ _) (GHC.L _ _) (GHC.L _ _)))
+         inExp :: (GHC.Located (GHC.HsExpr GhcPs)) -> RefactGhc (GHC.Located (GHC.HsExpr GhcPs))
+         inExp exp1@(GHC.L _ (GHC.HsIf {}))
            | sameOccurrence expr exp1
            = do
                newExp <- ifToCaseTransform exp1
@@ -71,9 +70,13 @@ reallyDoIfToCase expr p = do
          inExp e = return e
 
 -- |Actually do the transformation
-ifToCaseTransform :: GHC.Located (GHC.HsExpr GHC.RdrName)
-                  -> RefactGhc (GHC.Located (GHC.HsExpr GHC.RdrName))
+ifToCaseTransform :: GHC.Located (GHC.HsExpr GhcPs)
+                  -> RefactGhc (GHC.Located (GHC.HsExpr GhcPs))
+#if __GLASGOW_HASKELL__ >= 806
+ifToCaseTransform li@(GHC.L _ (GHC.HsIf _ _se e1 e2 e3)) = do
+#else
 ifToCaseTransform li@(GHC.L _ (GHC.HsIf _se e1 e2 e3)) = do
+#endif
   caseLoc        <- liftT uniqueSrcSpanT -- HaRe:-1:1
   trueMatchLoc   <- liftT uniqueSrcSpanT -- HaRe:-1:2
   trueLoc1       <- liftT uniqueSrcSpanT -- HaRe:-1:3
@@ -90,54 +93,104 @@ ifToCaseTransform li@(GHC.L _ (GHC.HsIf _se e1 e2 e3)) = do
 #endif
   let trueName  = mkRdrName "True"
   let falseName = mkRdrName "False"
+#if __GLASGOW_HASKELL__ >= 806
+  let ret = GHC.L caseLoc (GHC.HsCase GHC.noExt e1
+#else
   let ret = GHC.L caseLoc (GHC.HsCase e1
+#endif
              (GHC.MG
+#if __GLASGOW_HASKELL__ >= 806
+              GHC.noExt 
+#endif
               (
 #if __GLASGOW_HASKELL__ > 710
               GHC.L matchesLoc
 #endif
               [
+#if __GLASGOW_HASKELL__ >= 806
+                (GHC.L trueMatchLoc $ GHC.Match GHC.noExt 
+#else
                 (GHC.L trueMatchLoc $ GHC.Match
+#endif
 #if __GLASGOW_HASKELL__ <= 710
                  Nothing
-#else
+#elif __GLASGOW_HASKELL__ <= 800
                  GHC.NonFunBindMatch
+#else
+                 GHC.CaseAlt
 #endif
                  [
                    GHC.L trueLoc1 $ GHC.ConPatIn (GHC.L trueLoc trueName) (GHC.PrefixCon [])
                  ]
+#if __GLASGOW_HASKELL__ >= 804
+#else
                  Nothing
+#endif
                  (GHC.GRHSs
+#if __GLASGOW_HASKELL__ >= 806
+                   GHC.noExt 
+#endif
                    [
+#if __GLASGOW_HASKELL__ >= 806
+                     GHC.L trueRhsLoc $ GHC.GRHS GHC.noExt [] e2
+#else
                      GHC.L trueRhsLoc $ GHC.GRHS [] e2
+#endif
                    ]
                    (
 #if __GLASGOW_HASKELL__ > 710
                     GHC.L lbTrueLoc
 #endif
+#if __GLASGOW_HASKELL__ >= 806
+                   (GHC.EmptyLocalBinds GHC.noExt)))
+#else
                    GHC.EmptyLocalBinds))
+#endif
                 )
               , (GHC.L falseMatchLoc $ GHC.Match
+#if __GLASGOW_HASKELL__ >= 806
+                  GHC.noExt 
+#endif
 #if __GLASGOW_HASKELL__ <= 710
                   Nothing
-#else
+#elif __GLASGOW_HASKELL__ <= 800
                   GHC.NonFunBindMatch
+#else
+                  GHC.CaseAlt
 #endif
                  [
                    GHC.L falseLoc1 $ GHC.ConPatIn (GHC.L falseLoc falseName) (GHC.PrefixCon [])
                  ]
+#if __GLASGOW_HASKELL__ >= 804
+#else
                  Nothing
+#endif
                  (GHC.GRHSs
+#if __GLASGOW_HASKELL__ >= 806
+                   GHC.noExt 
+#endif
                    [
+#if __GLASGOW_HASKELL__ >= 806
+                     GHC.L falseRhsLoc $ GHC.GRHS GHC.noExt [] e3
+#else
                      GHC.L falseRhsLoc $ GHC.GRHS [] e3
+#endif
                    ]
                    (
 #if __GLASGOW_HASKELL__ > 710
                    GHC.L lbFalseLoc
 #endif
+#if __GLASGOW_HASKELL__ >= 806
+                   (GHC.EmptyLocalBinds GHC.noExt)))
+#else
                    GHC.EmptyLocalBinds))
+#endif
                 )
-              ]) [] GHC.placeHolderType GHC.FromSource))
+              ])
+#if __GLASGOW_HASKELL__ < 806
+              [] GHC.placeHolderType
+#endif
+              GHC.FromSource))
 
   oldAnns <- liftT $ getAnnsT
   let annIf   = gfromJust "Case.annIf"   $ getAnnotationEP li oldAnns

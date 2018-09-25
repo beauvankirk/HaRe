@@ -26,6 +26,8 @@ module Language.Haskell.Refact.Utils.MonadFunctions
 
        , getRefactInscopes
 
+       , getRefactTyped
+
        , getRefactRenamed
        , putRefactRenamed
 
@@ -38,8 +40,10 @@ module Language.Haskell.Refact.Utils.MonadFunctions
        , mergeRefactAnns
 
        -- *
+       , getRefactParsedMod
        , putParsedModule
        , clearParsedModule
+       , typeCheckModule
        , getRefactFileName
        , getRefactTargetModule
        , getRefactModule
@@ -66,6 +70,7 @@ module Language.Haskell.Refact.Utils.MonadFunctions
        , fileNameFromModSummary
        , mkNewGhcNamePure
 
+       , logData
        , logDataWithAnns
        , logAnns
        , logParsedSource
@@ -76,6 +81,7 @@ module Language.Haskell.Refact.Utils.MonadFunctions
        , initRefactModule
        , initTokenCacheLayout
        , initRdrNameMap
+       , showOutputable
        ) where
 
 import Control.Monad.State
@@ -83,9 +89,12 @@ import Data.List
 
 import qualified GHC           as GHC
 import qualified GhcMonad      as GHC
+import qualified GhcMod.Utils  as GM
 import qualified Module        as GHC
 import qualified Name          as GHC
 import qualified Unique        as GHC
+-- import qualified HscTypes      as GHC (md_exports)
+-- import qualified TcRnTypes     as GHC (tcg_rdr_env)
 #if __GLASGOW_HASKELL__ > 710
 import qualified Var
 #endif
@@ -97,12 +106,14 @@ import Language.Haskell.GHC.ExactPrint
 import Language.Haskell.GHC.ExactPrint.Annotate
 import Language.Haskell.GHC.ExactPrint.Parsers
 import Language.Haskell.GHC.ExactPrint.Utils
+import Language.Haskell.GHC.ExactPrint.Types
 
 import Language.Haskell.Refact.Utils.Monad
 import Language.Haskell.Refact.Utils.TypeSyn
 import Language.Haskell.Refact.Utils.Types
-
 import qualified Data.Map as Map
+
+import Outputable
 
 -- ---------------------------------------------------------------------
 
@@ -115,7 +126,7 @@ fetchAnnsFinal = do
 
 -- ---------------------------------------------------------------------
 
-getTypecheckedModule :: RefactGhc TypecheckedModule
+getTypecheckedModule :: RefactGhc GHC.TypecheckedModule
 getTypecheckedModule = do
   mtm <- gets rsModule
   case mtm of
@@ -139,6 +150,9 @@ setRefactStreamModified rr = do
 getRefactInscopes :: RefactGhc InScopes
 getRefactInscopes = GHC.getNamesInScope
 
+getRefactTyped :: RefactGhc GHC.TypecheckedSource
+getRefactTyped = getTypecheckedModule >>= (\tm -> return $ GHC.tm_typechecked_source tm)
+
 getRefactRenamed :: RefactGhc GHC.RenamedSource
 getRefactRenamed = do
   mtm <- gets rsModule
@@ -151,7 +165,7 @@ putRefactRenamed renamed = do
   mrm <- gets rsModule
   let rm = gfromJust "putRefactRenamed" mrm
   let tm = rsTypecheckedMod rm
-  let tm' = tm { tmRenamedSource = renamed }
+  let tm' = tm { GHC.tm_renamed_source = Just renamed }
   let rm' = rm { rsTypecheckedMod = tm' }
   put $ st {rsModule = Just rm'}
 
@@ -161,12 +175,12 @@ getRefactParsed = do
   let tm = gfromJust "getRefactParsed" mtm
   let t  = rsTypecheckedMod tm
 
-  let pm = tmParsedModule t
+  let pm = GHC.tm_parsed_module t
   return $ GHC.pm_parsed_source pm
 
 putRefactParsed :: GHC.ParsedSource -> Anns -> RefactGhc ()
 putRefactParsed parsed newAnns = do
-  logm $ "putRefactParsed:setting rsStreamModified"
+  -- logm $ "putRefactParsed:setting rsStreamModified"
   st <- get
   mrm <- gets rsModule
   let rm = gfromJust "putRefactParsed" mrm
@@ -174,8 +188,8 @@ putRefactParsed parsed newAnns = do
   -- let tk' = modifyAnns (rsTokenCache rm) (const newAnns)
   let tk' = modifyAnns (rsTokenCache rm) (mergeAnns newAnns)
 
-  let pm = (tmParsedModule tm) { GHC.pm_parsed_source = parsed }
-  let tm' = tm { tmParsedModule = pm }
+  let pm = (GHC.tm_parsed_module tm) { GHC.pm_parsed_source = parsed }
+  let tm' = tm { GHC.tm_parsed_module = pm }
   let rm' = rm { rsTypecheckedMod = tm', rsTokenCache = tk', rsStreamModified = RefacModified }
   put $ st {rsModule = Just rm'}
 
@@ -225,7 +239,14 @@ modifyAnns tk f = tk'
 
 -- ----------------------------------------------------------------------
 
-putParsedModule :: [Comment] -> TypecheckedModule -> RefactGhc ()
+getRefactParsedMod :: RefactGhc (GHC.ParsedModule)
+getRefactParsedMod = do
+  mtm <- gets rsModule
+  let tm = gfromJust "getRefactParsed" mtm
+  let t  = rsTypecheckedMod tm
+  return $ GHC.tm_parsed_module t
+
+putParsedModule :: [Comment] -> GHC.TypecheckedModule -> RefactGhc ()
 putParsedModule cppComments tm = do
   st <- get
   put $ st { rsModule = initRefactModule cppComments tm }
@@ -234,6 +255,30 @@ clearParsedModule :: RefactGhc ()
 clearParsedModule = do
   st <- get
   put $ st { rsModule = Nothing }
+
+
+-- | Manually runs the typechecker on the target module parsed source, updates
+--the rsModule accordingly
+typeCheckModule :: RefactGhc ()
+typeCheckModule = do
+  st <- get
+  mtm <- gets rsModule
+  let tm = gfromJust "typecheckModule mtm" mtm
+      t = rsTypecheckedMod tm
+      pm = GHC.tm_parsed_module t
+  tm' <- GHC.typecheckModule pm
+  -- let
+  --   rmSource = gfromJust "typecheckModule rmSource" (GHC.tm_renamed_source tm')
+  --   (gblEnv, md) = GHC.tm_internals_ tm'
+  --   tm'' = TypecheckedModule {
+  --       tmParsedModule = GHC.tm_parsed_module tm',
+  --       tmRenamedSource = rmSource,
+  --       tmTypecheckedSource = GHC.tm_typechecked_source tm',
+  --       tmMinfExports = GHC.md_exports md,
+  --       tmMinfRdrEnv = Just (GHC.tcg_rdr_env gblEnv)
+  --       }
+  let rm = tm {rsTypecheckedMod = tm'}
+  put $ st {rsModule = Just rm}
 
 -- ---------------------------------------------------------------------
 
@@ -323,8 +368,11 @@ getRefactFileName = do
   mtm <- gets rsModule
   case mtm of
     Nothing  -> return Nothing
-    Just tm -> return $ Just (fileNameFromModSummary $ GHC.pm_mod_summary
-                              $ tmParsedModule $ rsTypecheckedMod tm)
+    Just tm -> do
+      revMap <- RefactGhc GM.mkRevRedirMapFunc
+      return $ Just (revMap $ fileNameFromModSummary $ GHC.pm_mod_summary
+                            $ GHC.tm_parsed_module $ rsTypecheckedMod tm)
+    --Just tm -> return $ Just (tmFileNameUnmapped $ rsTypecheckedMod tm)
 
 -- ---------------------------------------------------------------------
 
@@ -344,7 +392,7 @@ getRefactModule = do
     Nothing  -> error $ "Hare.MonadFunctions.getRefactModule:no module loaded"
     Just tm -> do
       let t  = rsTypecheckedMod tm
-      let pm = tmParsedModule t
+      let pm = GHC.tm_parsed_module t
       return (GHC.ms_mod $ GHC.pm_mod_summary pm)
 
 -- ---------------------------------------------------------------------
@@ -411,6 +459,12 @@ getStateStorage = do
 
 -- ---------------------------------------------------------------------
 
+logData :: (SYB.Data a) => String -> a -> RefactGhc ()
+-- logData str ast = logm $ str ++ (SYB.showData SYB.Parser 3 ast)
+logData str ast = logm $ str ++ (showAnnData mempty 3 ast)
+
+-- ---------------------------------------------------------------------
+
 logDataWithAnns :: (SYB.Data a) => String -> a -> RefactGhc ()
 logDataWithAnns str ast = do
   anns <- getRefactAnns
@@ -460,14 +514,14 @@ exactPrintExpr ast = do
 -- ---------------------------------------------------------------------
 
 
-initRefactModule :: [Comment] -> TypecheckedModule -> Maybe RefactModule
+initRefactModule :: [Comment] -> GHC.TypecheckedModule -> Maybe RefactModule
 initRefactModule cppComments tm
   = Just (RefMod { rsTypecheckedMod = tm
                  , rsNameMap = initRdrNameMap tm
                  , rsTokenCache = initTokenCacheLayout (relativiseApiAnnsWithComments
                                      cppComments
-                                    (GHC.pm_parsed_source $ tmParsedModule tm)
-                                    (GHC.pm_annotations $ tmParsedModule tm))
+                                    (GHC.pm_parsed_source $ GHC.tm_parsed_module tm)
+                                    (GHC.pm_annotations $ GHC.tm_parsed_module tm))
                  , rsStreamModified = RefacUnmodifed
                  })
 
@@ -484,13 +538,13 @@ initTokenCacheLayout a = TK (Map.fromList [((TId 0),a)]) (TId 0)
 -- with the wrinkle that we need to Location of the RdrName to make sure we have
 -- the right Name, but not all RdrNames have a Location.
 -- This function is called before the RefactGhc monad is active.
-initRdrNameMap :: TypecheckedModule -> NameMap
+initRdrNameMap :: GHC.TypecheckedModule -> NameMap
 initRdrNameMap tm = r
   where
-    parsed  = GHC.pm_parsed_source $ tmParsedModule tm
-    renamed = tmRenamedSource tm
+    parsed  = GHC.pm_parsed_source $ GHC.tm_parsed_module tm
+    renamed = GHC.tm_renamed_source tm
 #if __GLASGOW_HASKELL__ > 710
-    typechecked = tmTypecheckedSource tm
+    typechecked = GHC.tm_typechecked_source tm
 #endif
 
     checkRdr :: GHC.Located GHC.RdrName -> Maybe [(GHC.SrcSpan,GHC.RdrName)]
@@ -502,27 +556,74 @@ initRdrNameMap tm = r
     checkName ln = Just [ln]
 
     rdrNames = gfromJust "initRdrNameMap" $ SYB.everything mappend (nameSybQuery checkRdr ) parsed
-#if __GLASGOW_HASKELL__ <= 710
-    names    = gfromJust "initRdrNameMap" $ SYB.everything mappend (nameSybQuery checkName) renamed
-#else
+#if __GLASGOW_HASKELL__ >= 806
     names1   = gfromJust "initRdrNameMap" $ SYB.everything mappend (nameSybQuery checkName) renamed
     names2 = names1 ++ SYB.everything (++) ([] `SYB.mkQ` fieldOcc
                                               `SYB.extQ` hsRecFieldN) renamed
     names  = names2 ++ SYB.everything (++) ([] `SYB.mkQ` hsRecFieldT) typechecked
 
-    fieldOcc :: GHC.FieldOcc GHC.Name -> [GHC.Located GHC.Name]
+    fieldOcc :: GHC.FieldOcc GhcRn -> [GHC.Located GHC.Name]
+    fieldOcc (GHC.FieldOcc n (GHC.L l _)) = [(GHC.L l n)]
+
+    hsRecFieldN :: GHC.LHsExpr GhcRn -> [GHC.Located GHC.Name]
+    hsRecFieldN (GHC.L _ (GHC.HsRecFld _ (GHC.Unambiguous n (GHC.L l _) ) )) = [GHC.L l n]
+    hsRecFieldN _ = []
+
+    hsRecFieldT :: GHC.LHsExpr GhcTc -> [GHC.Located GHC.Name]
+    hsRecFieldT (GHC.L _ (GHC.HsRecFld _ (GHC.Ambiguous n (GHC.L l _)) )) = [GHC.L l (Var.varName n)]
+    hsRecFieldT _ = []
+#elif __GLASGOW_HASKELL__ > 710
+    names1   = gfromJust "initRdrNameMap" $ SYB.everything mappend (nameSybQuery checkName) renamed
+    names2 = names1 ++ SYB.everything (++) ([] `SYB.mkQ` fieldOcc
+                                              `SYB.extQ` hsRecFieldN) renamed
+    names  = names2 ++ SYB.everything (++) ([] `SYB.mkQ` hsRecFieldT) typechecked
+
+    fieldOcc :: GHC.FieldOcc GhcRn -> [GHC.Located GHC.Name]
     fieldOcc (GHC.FieldOcc (GHC.L l _) n) = [(GHC.L l n)]
 
-    hsRecFieldN :: GHC.LHsExpr GHC.Name -> [GHC.Located GHC.Name]
+    hsRecFieldN :: GHC.LHsExpr GhcRn -> [GHC.Located GHC.Name]
     hsRecFieldN (GHC.L _ (GHC.HsRecFld (GHC.Unambiguous (GHC.L l _) n) )) = [GHC.L l n]
     hsRecFieldN _ = []
 
-    hsRecFieldT :: GHC.LHsExpr GHC.Id -> [GHC.Located GHC.Name]
+    hsRecFieldT :: GHC.LHsExpr GhcTc -> [GHC.Located GHC.Name]
     hsRecFieldT (GHC.L _ (GHC.HsRecFld (GHC.Ambiguous (GHC.L l _) n) )) = [GHC.L l (Var.varName n)]
     hsRecFieldT _ = []
+#else
+    names    = gfromJust "initRdrNameMap" $ SYB.everything mappend (nameSybQuery checkName) renamed
 #endif
 
-    nameMap = Map.fromList $ map (\(GHC.L l n) -> (l,n)) names
+#if __GLASGOW_HASKELL__ >= 806
+    namesIe = names
+#elif (defined(MIN_VERSION_GLASGOW_HASKELL) && (MIN_VERSION_GLASGOW_HASKELL(8,2,1,0)))
+    -- This is a workaround for https://ghc.haskell.org/trac/ghc/ticket/14189
+    -- namesIeParsedL = SYB.everything (++) ([] `SYB.mkQ` ieThingWith) (GHC.hsmodExports $ GHC.unLoc parsed)
+    namesIeParsed = Map.fromList $ SYB.everything (++) ([] `SYB.mkQ` ieThingWith) (GHC.hsmodExports $ GHC.unLoc parsed)
+
+
+    ieThingWith :: GHC.IE GhcPs -> [(GHC.SrcSpan, [GHC.SrcSpan])]
+    ieThingWith (GHC.IEThingWith l _ sub_rdrs _) = [(GHC.getLoc l,map GHC.getLoc sub_rdrs)]
+    ieThingWith _ = []
+
+    renamedExports = case renamed of
+                       Nothing -> Nothing
+                       Just (_,_,es,_) -> es
+    namesIeRenamed = SYB.everything (++) ([] `SYB.mkQ` ieThingWithNames) renamedExports
+
+    ieThingWithNames :: GHC.IE GhcRn -> [GHC.Located GHC.Name]
+    ieThingWithNames (GHC.IEThingWith l _ sub_rdrs _) = (GHC.ieLWrappedName l:nameSubs)
+      where
+        rdrSubLocs = gfromJust "ieThingWithNames" $ Map.lookup (GHC.getLoc l) namesIeParsed
+        nameSubs = map (\(loc,GHC.L _ lwn) -> GHC.L loc (GHC.ieWrappedName lwn)) $ zip rdrSubLocs sub_rdrs
+    ieThingWithNames _ = []
+
+    namesIe = case SYB.everything mappend (nameSybQuery checkName) namesIeRenamed of
+       Nothing -> names
+       Just ns -> names ++ ns
+#else
+    namesIe = names
+#endif
+
+    nameMap = Map.fromList $ map (\(GHC.L l n) -> (l,n)) namesIe
 
     -- If the name does not exist (e.g. a TH Splice that has been expanded, make a new one)
     -- No attempt is made to make sure that equivalent ones have equivalent names.
@@ -609,7 +710,6 @@ nameSybQuery checker = q
 #if __GLASGOW_HASKELL__ <= 710
                 `SYB.extQ` workerBind
                 `SYB.extQ` workerExpr
-                -- `SYB.extQ` workerLIE
                 `SYB.extQ` workerHsTyVarBndr
                 `SYB.extQ` workerLHsType
 #endif
@@ -641,7 +741,7 @@ nameSybQuery checker = q
 
 -- ---------------------------------------------------------------------
 
-parseDeclWithAnns :: String -> RefactGhc (GHC.LHsDecl GHC.RdrName)
+parseDeclWithAnns :: String -> RefactGhc (GHC.LHsDecl GhcPs)
 parseDeclWithAnns src = do
   u <- gets rsUniqState
   putUnique (u+1)
@@ -656,3 +756,5 @@ parseDeclWithAnns src = do
 
 -- EOF
 
+showOutputable :: (Outputable o) => o -> String
+showOutputable = showSDoc_ . ppr

@@ -1,3 +1,4 @@
+{-# LANGUAGE CPP #-}
 {-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE ViewPatterns #-}
 module Language.Haskell.Refact.Refactoring.Simple(removeBracket) where
@@ -6,7 +7,7 @@ import qualified Data.Generics         as SYB
 
 import qualified GHC           as GHC
 
-import qualified GhcMod as GM (Options(..))
+import qualified GhcModCore as GM (Options(..))
 import Language.Haskell.Refact.API
 
 -- To be moved into HaRe API
@@ -23,23 +24,25 @@ import System.Directory
 -- | Convert an if expression to a case expression
 removeBracket :: RefactSettings -> GM.Options -> FilePath -> SimpPos -> SimpPos -> IO [FilePath]
 removeBracket settings opts fileName beginPos endPos = do
-  absFileName <- canonicalizePath fileName
+  absFileName <- normaliseFilePath fileName
   let applied = (:[]) . fst <$> applyRefac
                   (removeBracketTransform absFileName beginPos endPos)
                   (RSFile absFileName)
   runRefacSession settings opts applied
 
-type HsExpr a = GHC.Located (GHC.HsExpr a)
-pattern HsPar l s = GHC.L l (GHC.HsPar s)
+-- type HsExpr a = GHC.Located (GHC.HsExpr a)
 
 removeBracketTransform  :: FilePath -> SimpPos -> SimpPos -> RefactGhc ()
 removeBracketTransform fileName beginPos endPos = do
-       parseSourceFileGhc fileName
        parsed <- getRefactParsed
-       let expr :: GHC.Located (GHC.HsExpr GHC.RdrName)
+       let expr :: GHC.Located (GHC.HsExpr GhcPs)
            expr = fromJust $ locToExp beginPos endPos parsed
-           removePar :: HsExpr GHC.RdrName -> RefactGhc (HsExpr GHC.RdrName)
-           removePar e@(HsPar _ s)
+           removePar :: GHC.LHsExpr GhcPs -> RefactGhc (GHC.LHsExpr GhcPs)
+#if __GLASGOW_HASKELL__ >= 806
+           removePar e@(GHC.L _ (GHC.HsPar _ s))
+#else
+           removePar e@(GHC.L _ (GHC.HsPar s))
+#endif
             | sameOccurrence e expr = do
               startAnns <- liftT $ getAnnsT
               let oldkey = mkAnnKey e

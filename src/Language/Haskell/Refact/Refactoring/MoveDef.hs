@@ -1,5 +1,6 @@
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TypeSynonymInstances #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
@@ -15,8 +16,6 @@ module Language.Haskell.Refact.Refactoring.MoveDef
   ) where
 
 import qualified Data.Generics as SYB
-import qualified GHC.SYB.Utils as SYB
-
 import qualified Data.Generics.Zipper as Z
 
 
@@ -31,10 +30,11 @@ import Data.Foldable
 import Data.List
 import Data.Maybe
 
-import qualified GhcMod as GM
+import qualified GhcModCore as GM
 import Language.Haskell.Refact.API
 
 import Language.Haskell.GHC.ExactPrint.Types
+import Language.Haskell.GHC.ExactPrint.Utils
 import Language.Haskell.GHC.ExactPrint
 
 import Data.Generics.Strafunski.StrategyLib.StrategyLib
@@ -83,14 +83,14 @@ the following six contexts:
 -- | Lift a definition to the top level
 liftToTopLevel :: RefactSettings -> GM.Options -> FilePath -> SimpPos -> IO [FilePath]
 liftToTopLevel settings opts fileName (row,col) = do
-  absFileName <- canonicalizePath fileName
+  absFileName <- normaliseFilePath fileName
   runRefacSession settings opts (compLiftToTopLevel absFileName (row,col))
 
 compLiftToTopLevel :: FilePath -> SimpPos
      -> RefactGhc [ApplyRefacResult]
 compLiftToTopLevel fileName (row,col) = do
       parseSourceFileGhc fileName
-      logParsedSource "liftToMod orig:"
+      -- logParsedSource "liftToMod orig:"
       parsed  <- getRefactParsed
       nm <- getRefactNameMap
 
@@ -217,9 +217,14 @@ liftToTopLevel' modName pn@(GHC.L _ n) = do
 
            else askRenamingMsg pns "lifting"
 
-isTupleDecl :: GHC.LHsDecl GHC.RdrName -> Bool
+isTupleDecl :: GHC.LHsDecl GhcPs -> Bool
+#if __GLASGOW_HASKELL__ >= 806
+isTupleDecl (GHC.L _ (GHC.ValD _ (GHC.PatBind _ (GHC.L _ GHC.TuplePat {}) _ _))) = True
+isTupleDecl (GHC.L _ (GHC.ValD _ (GHC.PatBind _ (GHC.L _ (GHC.AsPat _ _ (GHC.L _ GHC.TuplePat {}))) _ _))) = True
+#else
 isTupleDecl (GHC.L _ (GHC.ValD (GHC.PatBind (GHC.L _ GHC.TuplePat {}) _ _ _ _))) = True
 isTupleDecl (GHC.L _ (GHC.ValD (GHC.PatBind (GHC.L _ (GHC.AsPat _ (GHC.L _ GHC.TuplePat {}))) _ _ _ _))) = True
+#endif
 isTupleDecl _ = False
 
 -- ---------------------------------------------------------------------
@@ -227,7 +232,7 @@ isTupleDecl _ = False
 -- | Move a definition one level up from where it is now
 liftOneLevel :: RefactSettings -> GM.Options -> FilePath -> SimpPos -> IO [FilePath]
 liftOneLevel settings opts fileName (row,col) = do
-  absFileName <- canonicalizePath fileName
+  absFileName <- normaliseFilePath fileName
   runRefacSession settings opts (compLiftOneLevel absFileName (row,col))
 
 compLiftOneLevel :: FilePath -> SimpPos
@@ -355,10 +360,10 @@ liftOneLevel' modName pn@(GHC.L _ n) = do
       doLiftOneLevel = do
              logm $ "in doLiftOneLevel"
              parsed <- getRefactParsed
-             logDataWithAnns "doLiftOneLevel:parsed" parsed
+             -- logDataWithAnns "doLiftOneLevel:parsed" parsed
              nm <- getRefactNameMap
              ans <- liftT getAnnsT
-             zp <- ztransformStagedM SYB.Parser
+             zp <- ztransformM
                                 (Nothing
                                 `SYB.mkQ`  (liftToModQ   nm ans)
                                 `SYB.extQ` (liftToMatchQ nm ans)
@@ -369,11 +374,11 @@ liftOneLevel' modName pn@(GHC.L _ n) = do
              liftedToTopLevel pn parsed'
 
            where
-             isMatch :: GHC.LMatch GHC.RdrName (GHC.LHsExpr GHC.RdrName) -> Bool
+             isMatch :: GHC.LMatch GhcPs (GHC.LHsExpr GhcPs) -> Bool
              isMatch _ = True
 
-             isHsLet :: GHC.LHsExpr GHC.RdrName -> Bool
-             isHsLet (GHC.L _ (GHC.HsLet _ _)) = True
+             isHsLet :: GHC.LHsExpr GhcPs -> Bool
+             isHsLet (GHC.L _ (GHC.HsLet {})) = True
              isHsLet _               = False
 
              -- ------------------------
@@ -381,8 +386,7 @@ liftOneLevel' modName pn@(GHC.L _ n) = do
              liftToModQ ::
                            NameMap -> Anns
                         -> GHC.ParsedSource
-                        -> Maybe (SYB.Stage
-                                  -> Z.Zipper GHC.ParsedSource
+                        -> Maybe (Z.Zipper GHC.ParsedSource
                                   -> RefactGhc (Z.Zipper GHC.ParsedSource))
              liftToModQ nm ans (p :: GHC.ParsedSource)
                 | nonEmptyList candidateBinds
@@ -406,9 +410,15 @@ liftOneLevel' modName pn@(GHC.L _ n) = do
 
              liftToMatchQ :: (SYB.Data a)
                           => NameMap -> Anns
-                          -> GHC.LMatch GHC.RdrName (GHC.LHsExpr GHC.RdrName)
-                          -> Maybe (SYB.Stage -> Z.Zipper a -> RefactGhc (Z.Zipper a))
-             liftToMatchQ nm ans (m@(GHC.L _ (GHC.Match _ _pats _mtyp (GHC.GRHSs _rhs ds)))::GHC.LMatch GHC.RdrName (GHC.LHsExpr GHC.RdrName))
+                          -> GHC.LMatch GhcPs (GHC.LHsExpr GhcPs)
+                          -> Maybe (Z.Zipper a -> RefactGhc (Z.Zipper a))
+#if __GLASGOW_HASKELL__ >= 806
+             liftToMatchQ nm ans (m@(GHC.L _ (GHC.Match _ _ _ (GHC.GRHSs _ _rhs ds)))::GHC.LMatch GhcPs (GHC.LHsExpr GhcPs))
+#elif __GLASGOW_HASKELL__ >= 804
+             liftToMatchQ nm ans (m@(GHC.L _ (GHC.Match _ _pats (GHC.GRHSs _rhs ds)))::GHC.LMatch GhcPs (GHC.LHsExpr GhcPs))
+#else
+             liftToMatchQ nm ans (m@(GHC.L _ (GHC.Match _ _pats _mtyp (GHC.GRHSs _rhs ds)))::GHC.LMatch GhcPs (GHC.LHsExpr GhcPs))
+#endif
                  | (nonEmptyList (definingDeclsRdrNames nm [n] (getHsDecls ans ds) False False))
                     = Just (doLiftZ m (getHsDecls ans  ds))
                  | otherwise = Nothing
@@ -417,8 +427,12 @@ liftOneLevel' modName pn@(GHC.L _ n) = do
 
              liftToLetQ :: SYB.Data a
                         => NameMap -> Anns
-                        -> GHC.LHsExpr GHC.RdrName -> Maybe (SYB.Stage -> Z.Zipper a -> RefactGhc (Z.Zipper a))
+                        -> GHC.LHsExpr GhcPs -> Maybe (Z.Zipper a -> RefactGhc (Z.Zipper a))
+#if __GLASGOW_HASKELL__ >= 806
+             liftToLetQ nm ans ll@(GHC.L _ (GHC.HsLet _ ds _e))
+#else
              liftToLetQ nm ans ll@(GHC.L _ (GHC.HsLet ds _e))
+#endif
                | nonEmptyList (definingDeclsRdrNames nm [n] (getHsDecls ans ds) False  False)
                  = Just (doLiftZ ll (getHsDecls ans ll))
                | otherwise = Nothing
@@ -428,19 +442,18 @@ liftOneLevel' modName pn@(GHC.L _ n) = do
 
              doLiftZ :: (SYB.Data t,SYB.Data a)
                => t -- ^Item containing the decls which contain the ones to be lifted
-               -> [GHC.LHsDecl GHC.RdrName] -- ^decls containing the ones to be lifted.
+               -> [GHC.LHsDecl GhcPs] -- ^decls containing the ones to be lifted.
                                             -- ++AZ++:TODO: these are redundant, can be pulled out of t
-               -> SYB.Stage -- ++AZ++:TODO: get rid of this
                -> Z.Zipper a
                -> RefactGhc (Z.Zipper a)
-             doLiftZ ds decls _stage z =
+             doLiftZ ds decls z =
                   do
                     logm $ "doLiftZ entered"
                     logDataWithAnns "doLiftZ:ds" ds
                     logDataWithAnns "doLiftZ:decls" decls
 
                     let zu = case (Z.up z) of
-                              Just zz -> fromMaybe (error $ "MoveDef.liftToLet.1" ++ SYB.showData SYB.Parser 0 decls)
+                              Just zz -> fromMaybe (error $ "MoveDef.liftToLet.1" ++ showAnnData mempty 0 decls)
                                   $ upUntil (False `SYB.mkQ` isMatch
                                                    `SYB.extQ` isHsLet
                                                    )
@@ -458,18 +471,28 @@ liftOneLevel' modName pn@(GHC.L _ n) = do
                         -- workerTop ren decls dd
 
 
-                      wmatch :: GHC.LMatch GHC.RdrName (GHC.LHsExpr GHC.RdrName)
-                             -> RefactGhc (GHC.LMatch GHC.RdrName (GHC.LHsExpr GHC.RdrName))
+                      wmatch :: GHC.LMatch GhcPs (GHC.LHsExpr GhcPs)
+                             -> RefactGhc (GHC.LMatch GhcPs (GHC.LHsExpr GhcPs))
+#if __GLASGOW_HASKELL__ >= 806
+                      wmatch (m@(GHC.L _ (GHC.Match _ _mln _pats grhss))) = do
+#elif __GLASGOW_HASKELL__ >= 804
+                      wmatch (m@(GHC.L _ (GHC.Match _mln _pats grhss))) = do
+#else
                       wmatch (m@(GHC.L _ (GHC.Match _mln _pats _typ grhss))) = do
-                         logm $ "wmatch entered:" ++ SYB.showData SYB.Parser 0 m
+#endif
+                         logm $ "wmatch entered:" ++ showAnnData mempty 0 m
                          nm <- getRefactNameMap
                          let (_,DN dd) = hsFreeAndDeclaredRdr nm grhss
 
                          decls' <- liftT $ hsDecls m
                          workerTop m decls' dd
 
-                      wlet :: GHC.LHsExpr GHC.RdrName -> RefactGhc (GHC.LHsExpr GHC.RdrName)
+                      wlet :: GHC.LHsExpr GhcPs -> RefactGhc (GHC.LHsExpr GhcPs)
+#if __GLASGOW_HASKELL__ >= 806
+                      wlet l@(GHC.L _ (GHC.HsLet _ dsl _e)) = do
+#else
                       wlet l@(GHC.L _ (GHC.HsLet dsl _e)) = do
+#endif
                          logm $ "wlet entered "
                          nm <- getRefactNameMap
                          let (_,DN dd) = hsFreeAndDeclaredRdr nm dsl
@@ -490,13 +513,13 @@ liftOneLevel' modName pn@(GHC.L _ n) = do
              -- This is currently used for everything but the top level
              workerTop :: (HasDecls t)
                 => t -- ^The destination of the lift operation
-                -> [GHC.LHsDecl GHC.RdrName] -- ^ list containing the decl to be
+                -> [GHC.LHsDecl GhcPs] -- ^ list containing the decl to be
                                              -- lifted
                 -> [GHC.Name] -- ^Declared variables in the destination
                 -> RefactGhc t
              workerTop dest ds dd
                   =do
-                      logm $ "MoveDef.worker: dest" ++ SYB.showData SYB.Parser 0 dest
+                      logm $ "MoveDef.worker: dest" ++ showAnnData mempty 0 dest
                       logm $ "MoveDef.workerTop: ds=" ++ (showGhc ds)
                       done <- getRefactDone
                       if done then return dest
@@ -518,7 +541,7 @@ liftOneLevel' modName pn@(GHC.L _ n) = do
                                     --True means the new decl will be at the same level with its parant.
                                     let toMove = parent'
                                     pdecls <- liftT $ hsDecls toMove
-                                    -- logm $ "MoveDef.workerTop:toMove=" ++ SYB.showData SYB.Parser 0 toMove
+                                    -- logm $ "MoveDef.workerTop:toMove=" ++ showAnnData mempty 0 toMove
                                     -- logm $ "MoveDef.workerTop:pdecls=" ++ (showGhc pdecls)
                                     let mAfter = case pdecls of
                                           [] -> Nothing
@@ -534,7 +557,7 @@ liftOneLevel' modName pn@(GHC.L _ n) = do
              -- TODO: get rid of this in favour of workerTop
              worker :: (HasDecls t)
                 => t -- ^The destination of the lift operation
-                -> [GHC.LHsDecl GHC.RdrName] -- ^ list containing the decl to be
+                -> [GHC.LHsDecl GhcPs] -- ^ list containing the decl to be
                                              -- lifted
                 -> GHC.Located GHC.Name -- ^ The name of the decl to be lifted
                 -> [GHC.Name] -- ^Declared variables in the destination
@@ -572,7 +595,7 @@ liftOneLevel' modName pn@(GHC.L _ n) = do
 -- | Move a definition one level down
 demote :: RefactSettings -> GM.Options -> FilePath -> SimpPos -> IO [FilePath]
 demote settings opts fileName (row,col) = do
-  absFileName <- canonicalizePath fileName
+  absFileName <- normaliseFilePath fileName
   runRefacSession settings opts (compDemote absFileName (row,col))
 
 compDemote ::FilePath -> SimpPos
@@ -597,21 +620,21 @@ moveDecl1 :: (SYB.Data t)
   -> Maybe GHC.Name -- ^ If specified, add defn after this one
 
   -> [GHC.Name]     -- ^ The first one is the decl to move
-  -> [GHC.LHsDecl GHC.RdrName]
+  -> [GHC.LHsDecl GhcPs]
   -> [GHC.Name]     -- ^ The signatures to remove. May be multiple if
                     --   decl being moved has a patbind.
-  -> [GHC.LSig GHC.RdrName] -- ^ lifted decls signature if present
+  -> [GHC.LSig GhcPs] -- ^ lifted decls signature if present
   -> RefactGhc t    -- ^ The updated syntax element (and tokens in monad)
 moveDecl1 t defName ns mliftedDecls sigNames mliftedSigs = do
   logm $ "moveDecl1:(defName,ns,sigNames,mliftedDecls)=" ++ showGhc (defName,ns,sigNames,mliftedDecls)
-  -- logm $ "moveDecl1:(t)=" ++ SYB.showData SYB.Parser 0 (t)
+  -- logm $ "moveDecl1:(t)=" ++ showAnnData mempty 0 (t)
 
   -- TODO: rmDecl can now remove the sig at the same time.
   (t'',_sigsRemoved) <- rmTypeSigs sigNames t
-  -- logm $ "moveDecl1:after rmTypeSigs:t''" ++ SYB.showData SYB.Parser 0 t''
+  -- logm $ "moveDecl1:after rmTypeSigs:t''" ++ showAnnData mempty 0 t''
   logm $ "moveDecl1:mliftedSigs=" ++ showGhc mliftedSigs
   (t',_declRemoved,_sigRemoved) <- rmDecl (ghead "moveDecl3.1"  ns) False t''
-  -- logm $ "moveDecl1:after rmDecl:t'" ++ SYB.showData SYB.Parser 0 t'
+  -- logm $ "moveDecl1:after rmDecl:t'" ++ showAnnData mempty 0 t'
   let sigs = map wrapSig mliftedSigs
   r <- addDecl t' defName (sigs++mliftedDecls,Nothing)
 
@@ -665,10 +688,12 @@ addParamsToParent  pn params t = do
   nm <- getRefactNameMap
   applyTP (full_buTP (idTP  `adhocTP` (inExp nm))) t
   where
-#if __GLASGOW_HASKELL__ <= 710
-    inExp nm (e@(GHC.L l (GHC.HsVar n)) :: GHC.LHsExpr GHC.RdrName) = do
+#if __GLASGOW_HASKELL__ >= 806
+    inExp nm (e@(GHC.L l (GHC.HsVar _ (GHC.L _ n))) :: GHC.LHsExpr GhcPs) = do
+#elif __GLASGOW_HASKELL__ > 710
+    inExp nm (e@(GHC.L l (GHC.HsVar (GHC.L _ n))) :: GHC.LHsExpr GhcPs) = do
 #else
-    inExp nm (e@(GHC.L l (GHC.HsVar (GHC.L _ n))) :: GHC.LHsExpr GHC.RdrName) = do
+    inExp nm (e@(GHC.L l (GHC.HsVar n)) :: GHC.LHsExpr GhcPs) = do
 #endif
       let ne = rdrName2NamePure nm (GHC.L l n)
       if GHC.nameUnique ne == GHC.nameUnique pn
@@ -712,8 +737,19 @@ willBeExportedByClientMod names renamed =
   let (_,_,exps,_) = renamed
   in if isNothing exps
         then False
+#if __GLASGOW_HASKELL__ >= 804
+        else
+          let exps' = map fst $ gfromJust "willBeExportedByClientMod" exps
+          in
+            any isJust $ map (\y-> (find (\x-> (simpModule x==Just y)) exps')) names
+#else
         else any isJust $ map (\y-> (find (\x-> (simpModule x==Just y)) (gfromJust "willBeExportedByClientMod" exps))) names
+#endif
+#if __GLASGOW_HASKELL__ >= 806
+     where simpModule (GHC.L _ (GHC.IEModuleContents _ (GHC.L _ m))) = Just m
+#else
      where simpModule (GHC.L _ (GHC.IEModuleContents (GHC.L _ m))) = Just m
+#endif
            simpModule _  = Nothing
 
 -- |get the module name or alias name by which the lifted identifier
@@ -723,18 +759,26 @@ willBeExportedByClientMod names renamed =
 willBeUnQualImportedBy :: GHC.ModuleName -> RefactGhc (Maybe [GHC.ModuleName])
 willBeUnQualImportedBy modName = do
    (_,imps,_,_) <- getRefactRenamed
-   let ms = filter (\(GHC.L _ (GHC.ImportDecl _ (GHC.L _ modName1) _qualify _source _safe isQualified _isImplicit _as h))
-                     -> modName == modName1 && (not isQualified) && (isNothing h || (isJust h && ((fst (fromJust h)) == True))))
+   let ms = filter (\(GHC.L _ (GHC.ImportDecl { GHC.ideclName = (GHC.L _ modName1)
+                                              , GHC.ideclQualified = isQualified
+                                              , GHC.ideclHiding = h}))
+                     -> modName == modName1 && (not isQualified)
+                     && (isNothing h || (isJust h && ((fst (fromJust h)) == True))))
                    imps
 
        res = if (emptyList ms) then Nothing
                                else Just $ nub $ map getModName ms
 
-       getModName (GHC.L _ (GHC.ImportDecl _ (GHC.L _ modName2) _qualify _source _safe _isQualified _isImplicit as _h))
+       getModName (GHC.L _ (GHC.ImportDecl { GHC.ideclName = (GHC.L _ modName2)
+                                           , GHC.ideclAs = as }))
         = if isJust as then simpModName (fromJust as)
                        else modName2
 
+#if __GLASGOW_HASKELL__ <= 800
        simpModName m = m
+#else
+       simpModName (GHC.L _ m) = m
+#endif
 
    logm $ "willBeUnQualImportedBy:(ms,res)=" ++ (showGhc (ms,res))
 
@@ -829,9 +873,9 @@ addParamsToParentAndLiftedDecl :: (SYB.Data t) =>
      GHC.Name   -- ^name of decl being lifted
   -> [GHC.Name] -- ^Declared names in parent
   -> t          -- ^parent
-  -> [GHC.LHsDecl GHC.RdrName] -- ^ decls being lifted
-  -> [GHC.LSig GHC.RdrName]    -- ^ lifted decls signature if present
-  -> RefactGhc (t, [GHC.LHsDecl GHC.RdrName], [GHC.LSig GHC.RdrName])
+  -> [GHC.LHsDecl GhcPs] -- ^ decls being lifted
+  -> [GHC.LSig GhcPs]    -- ^ lifted decls signature if present
+  -> RefactGhc (t, [GHC.LHsDecl GhcPs], [GHC.LSig GhcPs])
 addParamsToParentAndLiftedDecl pn dd parent liftedDecls mLiftedSigs
   =do
        logm $ "addParamsToParentAndLiftedDecl:liftedDecls=" ++ (showGhc liftedDecls)
@@ -863,201 +907,6 @@ addParamsToParentAndLiftedDecl pn dd parent liftedDecls mLiftedSigs
 
                         return (parent',liftedDecls', mLiftedSigs')
          else return (parent,liftedDecls,mLiftedSigs)
-
--- ---------------------------------------------------------------------
-{-
--- TODO: perhaps move this to TypeUtils
-addParamsToSigs :: [GHC.Name] -> GHC.LSig GHC.RdrName -> RefactGhc (GHC.LSig GHC.RdrName)
-addParamsToSigs [] ms = return ms
-addParamsToSigs newParams (GHC.L l (GHC.TypeSig lns ltyp pns)) = do
-  mts <- mapM getTypeForName newParams
-  let ts = catMaybes mts
-  logm $ "addParamsToSigs:ts=" ++ showGhc ts
-  logDataWithAnns "addParamsToSigs:ts=" ts
-  let newStr = ":: " ++ (intercalate " -> " $ map printSigComponent ts) ++ " -> "
-  logm $ "addParamsToSigs:newStr=[" ++ newStr ++ "]"
-  typ' <- liftT $ foldlM addOneType ltyp (reverse ts)
-  sigOk <- isNewSignatureOk ts
-  logm $ "addParamsToSigs:(sigOk,newStr)=" ++ show (sigOk,newStr)
-  if sigOk
-    then return (GHC.L l (GHC.TypeSig lns typ' pns))
-    else error $ "\nNew type signature may fail type checking: " ++ newStr ++ "\n"
-  where
-    addOneType :: GHC.LHsType GHC.RdrName -> GHC.Type -> Transform (GHC.LHsType GHC.RdrName)
-    addOneType et t = do
-      hst <- typeToLHsType t
-      ss1 <- uniqueSrcSpanT
-      hst1 <- case t of
-        (GHC.FunTy _ _) -> do
-          ss <- uniqueSrcSpanT
-          let t1 = GHC.L ss (GHC.HsParTy hst)
-          setEntryDPT hst (DP (0,0))
-          addSimpleAnnT t1  (DP (0,0)) [((G GHC.AnnOpenP),DP (0,1)),((G GHC.AnnCloseP),DP (0,0))]
-          return t1
-        _ -> return hst
-      let typ = GHC.L ss1 (GHC.HsFunTy hst1 et)
-
-      addSimpleAnnT typ (DP (0,0)) [((G GHC.AnnRarrow),DP (0,1))]
-      return typ
-
-addParamsToSigs np ls = error $ "addParamsToSigs: no match for:" ++ showGhc (np,ls)
-
--- ---------------------------------------------------------------------
-
-printSigComponent :: GHC.Type -> String
-printSigComponent x = ppType x
-
--- ---------------------------------------------------------------------
-
--- |Fail any signature having a forall in it.
--- TODO: this is unnecesarily restrictive, but needs
--- a) proper reversing of GHC.Type to GHC.LhsType
--- b) some serious reverse type inference to ensure that the
---    constraints are modified properly to merge the old signature
---    part and the new.
-isNewSignatureOk :: [GHC.Type] -> RefactGhc Bool
-isNewSignatureOk types = do
-  -- NOTE: under some circumstances enabling Rank2Types or RankNTypes
-  --       can resolve the type conflict, this can potentially be checked
-  --       for.
-  -- NOTE2: perhaps proceed and reload the tentative refactoring into
-  --        the GHC session and accept it only if it type checks
-  let
-    r = SYB.everythingStaged SYB.TypeChecker (++) []
-          ([] `SYB.mkQ` usesForAll) types
-    usesForAll (GHC.ForAllTy _ _) = [1::Int]
-    usesForAll _                  = []
-
-  return $ emptyList r
-
--- ---------------------------------------------------------------------
-
--- TODO: perhaps move this to TypeUtils
--- TODO: complete this
-typeToLHsType :: GHC.Type -> Transform (GHC.LHsType GHC.RdrName)
-typeToLHsType (GHC.TyVarTy v)   = do
-  ss <- uniqueSrcSpanT
-  let typ = GHC.L ss (GHC.HsTyVar (GHC.nameRdrName $ Var.varName v))
-  addSimpleAnnT typ (DP (0,0)) [((G GHC.AnnVal),DP (0,0))]
-  return typ
-
-typeToLHsType (GHC.AppTy t1 t2) = do
-  t1' <- typeToLHsType t1
-  t2' <- typeToLHsType t2
-  ss <- uniqueSrcSpanT
-  return $ GHC.L ss (GHC.HsAppTy t1' t2')
-
-typeToLHsType t@(GHC.TyConApp _tc _ts) = tyConAppToHsType t
-
-typeToLHsType (GHC.FunTy t1 t2) = do
-  t1' <- typeToLHsType t1
-  t2' <- typeToLHsType t2
-  ss <- uniqueSrcSpanT
-  let typ = GHC.L ss (GHC.HsFunTy t1' t2')
-  addSimpleAnnT typ (DP (0,0)) [((G GHC.AnnRarrow),DP (0,1))]
-  return typ
-
-typeToLHsType (GHC.ForAllTy _v t) = do
-  t' <- typeToLHsType t
-  ss1 <- uniqueSrcSpanT
-  ss2 <- uniqueSrcSpanT
-  return $ GHC.L ss1 (GHC.HsForAllTy GHC.Explicit Nothing (GHC.HsQTvs [] []) (GHC.L ss2 []) t')
-
-typeToLHsType (GHC.LitTy (GHC.NumTyLit i)) = do
-  ss <- uniqueSrcSpanT
-  let typ = GHC.L ss (GHC.HsTyLit (GHC.HsNumTy (show i) i)) :: GHC.LHsType GHC.RdrName
-  addSimpleAnnT typ (DP (0,0)) [((G GHC.AnnVal),DP (0,0))]
-  return typ
-
-typeToLHsType (GHC.LitTy (GHC.StrTyLit s)) = do
-  ss <- uniqueSrcSpanT
-  let typ = GHC.L ss (GHC.HsTyLit (GHC.HsStrTy "" s)) :: GHC.LHsType GHC.RdrName
-  addSimpleAnnT typ (DP (0,0)) [((G GHC.AnnVal),DP (0,0))]
-  return typ
-
-
-{-
-data Type
-  = TyVarTy Var	-- ^ Vanilla type or kind variable (*never* a coercion variable)
-
-  | AppTy         -- See Note [AppTy invariant]
-	Type
-	Type		-- ^ Type application to something other than a 'TyCon'. Parameters:
-	                --
-                        --  1) Function: must /not/ be a 'TyConApp',
-                        --     must be another 'AppTy', or 'TyVarTy'
-	                --
-	                --  2) Argument type
-
-  | TyConApp      -- See Note [AppTy invariant]
-	TyCon
-	[KindOrType]	-- ^ Application of a 'TyCon', including newtypes /and/ synonyms.
-	                -- Invariant: saturated appliations of 'FunTyCon' must
-	                -- use 'FunTy' and saturated synonyms must use their own
-                        -- constructors. However, /unsaturated/ 'FunTyCon's
-                        -- do appear as 'TyConApp's.
-	                -- Parameters:
-	                --
-	                -- 1) Type constructor being applied to.
-	                --
-                        -- 2) Type arguments. Might not have enough type arguments
-                        --    here to saturate the constructor.
-                        --    Even type synonyms are not necessarily saturated;
-                        --    for example unsaturated type synonyms
-	                --    can appear as the right hand side of a type synonym.
-
-  | FunTy
-	Type
-	Type		-- ^ Special case of 'TyConApp': @TyConApp FunTyCon [t1, t2]@
-			-- See Note [Equality-constrained types]
-
-  | ForAllTy
-	Var         -- Type or kind variable
-	Type	        -- ^ A polymorphic type
-
-  | LitTy TyLit     -- ^ Type literals are simillar to type constructors.
-
--}
-
-tyConAppToHsType :: GHC.Type -> Transform (GHC.LHsType GHC.RdrName)
-tyConAppToHsType (GHC.TyConApp tc _ts) = r (show $ GHC.tyConName tc)
-  where
-    r str = do
-      ss <- uniqueSrcSpanT
-      let typ = GHC.L ss (GHC.HsTyLit (GHC.HsStrTy str $ GHC.mkFastString str)) :: GHC.LHsType GHC.RdrName
-      addSimpleAnnT typ (DP (0,0)) [((G GHC.AnnVal),DP (0,1))]
-      return typ
-
--- tyConAppToHsType t@(GHC.TyConApp _tc _ts)
---    = error $ "tyConAppToHsType: unexpected:" ++ (SYB.showData SYB.TypeChecker 0 t)
-
-{-
-HsType
-HsForAllTy HsExplicitFlag (LHsTyVarBndrs name) (LHsContext name) (LHsType name)
-HsTyVar name
-HsAppTy (LHsType name) (LHsType name)
-HsFunTy (LHsType name) (LHsType name)
-HsListTy (LHsType name)
-HsPArrTy (LHsType name)
-HsTupleTy HsTupleSort [LHsType name]
-HsOpTy (LHsType name) (LHsTyOp name) (LHsType name)
-HsParTy (LHsType name)
-HsIParamTy HsIPName (LHsType name)
-HsEqTy (LHsType name) (LHsType name)
-HsKindSig (LHsType name) (LHsKind name)
-HsQuasiQuoteTy (HsQuasiQuote name)
-HsSpliceTy (HsSplice name) FreeVars PostTcKind
-HsDocTy (LHsType name) LHsDocString
-HsBangTy HsBang (LHsType name)
-HsRecTy [ConDeclField name]
-HsCoreTy Type
-HsExplicitListTy PostTcKind [LHsType name]
-HsExplicitTupleTy [PostTcKind] [LHsType name]
-HsTyLit HsTyLit
-HsWrapTy HsTyWrapper (HsType name)
--}
-
--}
 
 --------------------------------End of Lifting-----------------------------------------
 
@@ -1143,12 +992,12 @@ doDemoting  pn = do
 
   parsed  <- getRefactParsed
 
-  parsed' <- everywhereMStaged' SYB.Parser   (SYB.mkM   demoteInMod
-                                             `SYB.extM` demoteInMatch
-                                             `SYB.extM` demoteInPat
-                                             `SYB.extM` demoteInLet
-                                             `SYB.extM` demoteInStmt
-                                            ) parsed
+  parsed' <- everywhereM' (SYB.mkM   demoteInMod
+                          `SYB.extM` demoteInMatch
+                          `SYB.extM` demoteInPat
+                          `SYB.extM` demoteInLet
+                          `SYB.extM` demoteInStmt
+                         ) parsed
   putRefactParsed parsed' emptyAnns
   nm <- getRefactNameMap
   decls <- liftT $ hsDecls parsed
@@ -1169,7 +1018,7 @@ doDemoting  pn = do
            else return x
 
        --2. The demoted definition is a local decl in a match
-       demoteInMatch match@(GHC.L _ (GHC.Match _ _pats _mt (GHC.GRHSs _ _ds))::GHC.LMatch GHC.RdrName (GHC.LHsExpr GHC.RdrName)) = do
+       demoteInMatch match@(GHC.L _ (GHC.Match {})::GHC.LMatch GhcPs (GHC.LHsExpr GhcPs)) = do
          -- decls <- liftT $ hsDecls ds
          decls <- liftT $ hsDecls match
          nm <- getRefactNameMap
@@ -1184,7 +1033,11 @@ doDemoting  pn = do
            else return match
 
        --3. The demoted definition is a local decl in a pattern binding
-       demoteInPat x@(pat@(GHC.L _ (GHC.ValD (GHC.PatBind _p (GHC.GRHSs _grhs _lb) _ _ _)))::GHC.LHsDecl GHC.RdrName) = do
+#if __GLASGOW_HASKELL__ >= 806
+       demoteInPat x@(pat@(GHC.L _ (GHC.ValD _ (GHC.PatBind {})))::GHC.LHsDecl GhcPs) = do
+#else
+       demoteInPat x@(pat@(GHC.L _ (GHC.ValD (GHC.PatBind _p (GHC.GRHSs _grhs _lb) _ _ _)))::GHC.LHsDecl GhcPs) = do
+#endif
          decls <- liftT $ hsDeclsPatBindD x
          nm <- getRefactNameMap
          if not $ emptyList (definingDeclsRdrNames nm [pn] decls False False)
@@ -1199,7 +1052,7 @@ doDemoting  pn = do
        demoteInPat x = return x
 
        --4: The demoted definition is a local decl in a Let expression
-       demoteInLet x@(letExp@(GHC.L _ (GHC.HsLet _ds _e))::GHC.LHsExpr GHC.RdrName) = do
+       demoteInLet x@(letExp@(GHC.L _ (GHC.HsLet {}))::GHC.LHsExpr GhcPs) = do
          decls <- liftT $ hsDecls x
          nm <- getRefactNameMap
          if not $ emptyList (definingDeclsRdrNames nm [pn] decls False False)
@@ -1216,7 +1069,7 @@ doDemoting  pn = do
 
        --6.The demoted definition is a local decl in a Let statement.
        -- demoteInStmt (letStmt@(HsLetStmt ds stmts):: (HsStmt (HsExpP) (HsPatP) [HsDeclP]))
-       demoteInStmt (letStmt@(GHC.L _ (GHC.LetStmt _binds))::GHC.LStmt GHC.RdrName (GHC.LHsExpr GHC.RdrName)) = do
+       demoteInStmt (letStmt@(GHC.L _ (GHC.LetStmt {}))::GHC.LStmt GhcPs (GHC.LHsExpr GhcPs)) = do
          decls <- liftT $ hsDecls letStmt
          nm <- getRefactNameMap
          if not $ emptyList (definingDeclsRdrNames nm [pn] decls False False)
@@ -1296,25 +1149,37 @@ doDemoting' t pn = do
 
     where
           ---find how many matches/pattern bindings use  'pn'-------
-          uses :: NameMap -> [GHC.Name] -> [GHC.LHsDecl GHC.RdrName] -> [Int]
+          uses :: NameMap -> [GHC.Name] -> [GHC.LHsDecl GhcPs] -> [Int]
           uses nm pns t2
                = concatMap used t2
                 where
 
-                  used :: GHC.LHsDecl GHC.RdrName -> [Int]
-#if __GLASGOW_HASKELL__ <= 710
-                  used (GHC.L _ (GHC.ValD (GHC.FunBind _n _ (GHC.MG matches _ _ _) _ _ _)))
-#else
+                  used :: GHC.LHsDecl GhcPs -> [Int]
+#if __GLASGOW_HASKELL__ >= 806
+                  used (GHC.L _ (GHC.ValD _ (GHC.FunBind _ _n (GHC.MG _ (GHC.L _ matches) _) _ _)))
+#elif __GLASGOW_HASKELL__ > 710
                   used (GHC.L _ (GHC.ValD (GHC.FunBind _n (GHC.MG (GHC.L _ matches) _ _ _) _ _ _)))
+#else
+                  used (GHC.L _ (GHC.ValD (GHC.FunBind _n _ (GHC.MG matches _ _ _) _ _ _)))
 #endif
                      = concatMap (usedInMatch pns) matches
 
+#if __GLASGOW_HASKELL__ >= 806
+                  used (GHC.L _ (GHC.ValD _ (GHC.PatBind _ pat rhs _)))
+#else
                   used (GHC.L _ (GHC.ValD (GHC.PatBind pat rhs _ _ _)))
+#endif
                     | (not $ findNamesRdr nm pns pat) && findNamesRdr nm pns rhs
                     = [1::Int]
                   used  _ = []
 
+#if __GLASGOW_HASKELL__ >= 806
+                  usedInMatch pns' (GHC.L _ (GHC.Match _ _ pats rhs))
+#elif __GLASGOW_HASKELL__ >= 804
+                  usedInMatch pns' (GHC.L _ (GHC.Match _ pats rhs))
+#else
                   usedInMatch pns' (GHC.L _ (GHC.Match _ pats _ rhs))
+#endif
                     | (not $ findNamesRdr nm pns' pats) && findNamesRdr nm pns' rhs
                      = [1::Int]
                   usedInMatch _ _ = []
@@ -1322,12 +1187,12 @@ doDemoting' t pn = do
 
           duplicateDecls :: (SYB.Data t,SYB.Typeable t)
                          => [GHC.Name] -- ^ function names to be demoted
-                         -> GHC.LHsDecl GHC.RdrName   -- ^Bind being demoted
-                         -> [GHC.LSig GHC.RdrName]    -- ^Signatures being demoted, if any
+                         -> GHC.LHsDecl GhcPs   -- ^Bind being demoted
+                         -> [GHC.LSig GhcPs]    -- ^Signatures being demoted, if any
                          -> t
                          -> RefactGhc t
           duplicateDecls pns demoted dsig o = do
-            logm $ "duplicateDecls:t=" ++ SYB.showData SYB.Parser 0 o
+            -- logm $ "duplicateDecls:t=" ++ showAnnData mempty 0 o
             hasDeclsSybTransform workerHsDecls workerBind o
             where
               workerHsDecls :: forall t. HasDecls t => t -> RefactGhc t
@@ -1336,7 +1201,7 @@ doDemoting' t pn = do
                 ds'' <- duplicateDecls' pns demoted dsig dds
                 liftT $ replaceDecls t' ds''
 
-              workerBind :: (GHC.LHsBind GHC.RdrName -> RefactGhc (GHC.LHsBind GHC.RdrName))
+              workerBind :: (GHC.LHsBind GhcPs -> RefactGhc (GHC.LHsBind GhcPs))
               workerBind t'@(GHC.L _ (GHC.PatBind{})) = do
                 dds <- liftT $ hsDeclsPatBind t'
                 ds'' <- duplicateDecls' pns demoted dsig dds
@@ -1346,19 +1211,25 @@ doDemoting' t pn = do
 
           -- duplicate demotedDecls to the right place (the outer most level where it is used).
           duplicateDecls' :: [GHC.Name] -- ^ function names to be demoted
-                          -> GHC.LHsDecl GHC.RdrName   -- ^Bind being demoted
-                          -> [GHC.LSig GHC.RdrName]    -- ^Signatures being demoted, if any
-                          -> [GHC.LHsDecl GHC.RdrName] -- ^Binds of original top
+                          -> GHC.LHsDecl GhcPs   -- ^Bind being demoted
+                          -> [GHC.LSig GhcPs]    -- ^Signatures being demoted, if any
+                          -> [GHC.LHsDecl GhcPs] -- ^Binds of original top
                                                        -- level entiity,
                                                        -- including src and dst
-                          -> RefactGhc [GHC.LHsDecl GHC.RdrName]
+                          -> RefactGhc [GHC.LHsDecl GhcPs]
           duplicateDecls' pns demoted dsig decls
              = do
                   nm <- getRefactNameMap
-                  everywhereMStaged' SYB.Parser (SYB.mkM (dupInMatch nm) -- top-down approach
-                                                `SYB.extM` (dupInPat nm)) decls
+                  everywhereM' (SYB.mkM (dupInMatch nm) -- top-down approach
+                             `SYB.extM` (dupInPat nm)) decls
                where
-                 dupInMatch nm (match@(GHC.L _ (GHC.Match _ pats _mt rhs)) :: GHC.LMatch GHC.RdrName (GHC.LHsExpr GHC.RdrName))
+#if __GLASGOW_HASKELL__ >= 806
+                 dupInMatch nm (match@(GHC.L _ (GHC.Match _ _ pats rhs)) :: GHC.LMatch GhcPs (GHC.LHsExpr GhcPs))
+#elif __GLASGOW_HASKELL__ >= 804
+                 dupInMatch nm (match@(GHC.L _ (GHC.Match _ pats rhs)) :: GHC.LMatch GhcPs (GHC.LHsExpr GhcPs))
+#else
+                 dupInMatch nm (match@(GHC.L _ (GHC.Match _ pats _mt rhs)) :: GHC.LMatch GhcPs (GHC.LHsExpr GhcPs))
+#endif
                    | (not $ findNamesRdr nm pns pats) && findNamesRdr nm pns rhs
                    =  do
                         done <- getRefactDone
@@ -1372,13 +1243,21 @@ doDemoting' t pn = do
                             return match'
                  dupInMatch _ x = return x
 
-                 dupInPat nm ((GHC.PatBind pat rhs@(GHC.GRHSs grhs lb) ty fvs ticks) :: GHC.HsBind GHC.RdrName)
+#if __GLASGOW_HASKELL__ >= 806
+                 dupInPat nm ((GHC.PatBind x pat rhs@(GHC.GRHSs y grhs lb) ticks) :: GHC.HsBind GhcPs)
+#else
+                 dupInPat nm ((GHC.PatBind pat rhs@(GHC.GRHSs grhs lb) ty fvs ticks) :: GHC.HsBind GhcPs)
+#endif
                     | (not $ findNamesRdr nm pns pat) && findNamesRdr nm pns rhs
                    = do
                        logm $ "duplicateDecls.dupInPat"
                        let declsToLift = definingDeclsRdrNames' nm pns t
                        lb' <- moveDecl1 lb Nothing pns declsToLift pns []
+#if __GLASGOW_HASKELL__ >= 806
+                       return (GHC.PatBind x pat (GHC.GRHSs y grhs lb') ticks)
+#else
                        return (GHC.PatBind pat (GHC.GRHSs grhs lb') ty fvs ticks)
+#endif
                  dupInPat _ x = return x
 
                  -- demotedDecls = definingDecls pns decls True False
@@ -1396,7 +1275,7 @@ doDemoting' t pn = do
              logm $ "declaredNamesInTargetPlace:res=" ++ (showGhc res)
              return res
                where
-                 inMatch ((GHC.Match _ _pats _ rhs) :: GHC.Match GHC.RdrName (GHC.LHsExpr GHC.RdrName))
+                 inMatch ((GHC.Match { GHC.m_grhss = rhs}) :: GHC.Match GhcPs (GHC.LHsExpr GhcPs))
                     | findNameInRdr nm pn' rhs = do
                      logm $ "declaredNamesInTargetPlace:inMatch"
                      -- fds <- hsFDsFromInside rhs
@@ -1404,7 +1283,7 @@ doDemoting' t pn = do
                      return ds
                  inMatch _ = return mzero
 
-                 inPat ((GHC.PatBind pat rhs _ _ _) :: GHC.HsBind GHC.RdrName)
+                 inPat ((GHC.PatBind {GHC.pat_lhs = pat, GHC.pat_rhs =  rhs }) :: GHC.HsBind GhcPs)
                     |findNameInRdr nm pn' rhs = do
                      logm $ "declaredNamesInTargetPlace:inPat"
                      let (_,DN ds) = hsFDsFromInsideRdr nm pat
@@ -1427,14 +1306,13 @@ doDemoting' t pn = do
 --PROBLEM: TYPE SIGNATURE SHOULD BE CHANGED.
 --- TEST THIS FUNCTION!!!
 foldParams :: [GHC.Name]             -- ^The (list?) function name being demoted
-           -> GHC.LMatch GHC.RdrName (GHC.LHsExpr GHC.RdrName)     -- ^The RHS of the place to receive the demoted decls
-           -> [GHC.LHsDecl GHC.RdrName] -- ^Binds of original top level entiity, including src and dst
-           -> GHC.LHsDecl GHC.RdrName   -- ^The decls being demoted
-           -> [GHC.LSig GHC.RdrName]    -- ^Signatures being demoted, if any
-           -> RefactGhc (GHC.LMatch GHC.RdrName (GHC.LHsExpr GHC.RdrName))
-foldParams pns match@(GHC.L l (GHC.Match _mfn _pats _mt rhs)) _decls demotedDecls dsig
-
-     =do
+           -> GHC.LMatch GhcPs (GHC.LHsExpr GhcPs)     -- ^The RHS of the place to receive the demoted decls
+           -> [GHC.LHsDecl GhcPs] -- ^Binds of original top level entiity, including src and dst
+           -> GHC.LHsDecl GhcPs   -- ^The decls being demoted
+           -> [GHC.LSig GhcPs]    -- ^Signatures being demoted, if any
+           -> RefactGhc (GHC.LMatch GhcPs (GHC.LHsExpr GhcPs))
+foldParams pns match@(GHC.L l (GHC.Match { GHC.m_grhss = rhs})) _decls demotedDecls dsig
+     = do
          logm $ "MoveDef.foldParams entered"
          nm <- getRefactNameMap
 
@@ -1476,32 +1354,30 @@ foldParams pns match@(GHC.L l (GHC.Match _mfn _pats _mt rhs)) _decls demotedDecl
 
     where
 
-       matchesInDecls :: GHC.LHsDecl GHC.RdrName -> [GHC.LMatch GHC.RdrName (GHC.LHsExpr GHC.RdrName)]
-#if __GLASGOW_HASKELL__ <= 710
-       matchesInDecls (GHC.L _ (GHC.ValD (GHC.FunBind _ _ (GHC.MG matches _ _ _) _ _ _))) = matches
-#else
+       matchesInDecls :: GHC.LHsDecl GhcPs -> [GHC.LMatch GhcPs (GHC.LHsExpr GhcPs)]
+#if __GLASGOW_HASKELL__ >= 806
+       matchesInDecls (GHC.L _ (GHC.ValD _ (GHC.FunBind _ _ (GHC.MG _ (GHC.L _ matches) _) _ _))) = matches
+#elif __GLASGOW_HASKELL__ > 710
        matchesInDecls (GHC.L _ (GHC.ValD (GHC.FunBind _ (GHC.MG (GHC.L _ matches) _ _ _) _ _ _))) = matches
+#else
+       matchesInDecls (GHC.L _ (GHC.ValD (GHC.FunBind _ _ (GHC.MG matches _ _ _) _ _ _))) = matches
 #endif
        matchesInDecls _x = []
 
-       patsInMatch (GHC.L _ (GHC.Match _ pats' _ _)) = pats'
+       patsInMatch (GHC.L _ (GHC.Match { GHC.m_pats = pats' })) = pats'
 
        foldInDemotedDecls :: [GHC.Name]  -- ^The (list?) of names to be demoted
                           -> [GHC.Name]  -- ^Any names that clash
-                          -> [(GHC.Name, GHC.HsExpr GHC.RdrName)] -- ^Parameter substitutions required
-                          -> [GHC.LHsDecl GHC.RdrName] -- ^Binds of original top level entity, including src and dst
-                          -> RefactGhc [GHC.LHsDecl GHC.RdrName]
+                          -> [(GHC.Name, GHC.HsExpr GhcPs)] -- ^Parameter substitutions required
+                          -> [GHC.LHsDecl GhcPs] -- ^Binds of original top level entity, including src and dst
+                          -> RefactGhc [GHC.LHsDecl GhcPs]
        foldInDemotedDecls  pns' clashedNames subst decls = do
           logm $ "foldInDemotedDecls:(pns',clashedNames,subst)=" ++ showGhc (pns',clashedNames,subst)
-          logm $ "foldInDemotedDecls:decls=" ++ SYB.showData SYB.Parser 0 decls
+          logm $ "foldInDemotedDecls:decls=" ++ showAnnData mempty 0 decls
           nm <- getRefactNameMap
-          SYB.everywhereMStaged SYB.Parser (SYB.mkM (worker nm) `SYB.extM` (workerBind nm)) decls
+          SYB.everywhereM (SYB.mkM (worker nm) `SYB.extM` (workerBind nm)) decls
           where
-#if __GLASGOW_HASKELL__ <= 710
-          worker nm (match'@(GHC.L _ (GHC.FunBind ln _ (GHC.MG _matches _ _ _) _ _ _)) :: GHC.LHsBind GHC.RdrName)
-#else
-          worker nm (match'@(GHC.L _ (GHC.FunBind ln (GHC.MG _matches _ _ _) _ _ _)) :: GHC.LHsBind GHC.RdrName)
-#endif
+          worker nm (match'@(GHC.L _ (GHC.FunBind { GHC.fun_id = ln })) :: GHC.LHsBind GhcPs)
             = do
                 logm $ "foldInDemotedDecls:rdrName2NamePure nm ln=" ++ show (rdrName2NamePure nm ln)
                 if isJust (find (== rdrName2NamePure nm ln) pns')
@@ -1513,10 +1389,18 @@ foldParams pns match@(GHC.L l (GHC.Match _mfn _pats _mt rhs)) _decls demotedDecl
                   else return match'
           worker _ x = return x
 
-          workerBind nm ((GHC.L ll (GHC.ValD d)) :: GHC.LHsDecl GHC.RdrName)
+#if __GLASGOW_HASKELL__ >= 806
+          workerBind nm ((GHC.L ll (GHC.ValD x d)) :: GHC.LHsDecl GhcPs)
+#else
+          workerBind nm ((GHC.L ll (GHC.ValD d)) :: GHC.LHsDecl GhcPs)
+#endif
             = do
                 (GHC.L _ d') <- worker nm (GHC.L ll d)
+#if __GLASGOW_HASKELL__ >= 806
+                return (GHC.L ll (GHC.ValD x d'))
+#else
                 return (GHC.L ll (GHC.ValD d'))
+#endif
           workerBind _ x = return x
 
       ------Get all of the paramaters supplied to pn ---------------------------
@@ -1527,9 +1411,9 @@ foldParams pns match@(GHC.L l (GHC.Match _mfn _pats _mt rhs)) _decls demotedDecl
                 where pn is 'rt' and  rhs is 'rt x1 y1 + rt x2 y2'
            -}
 
-       allParams :: GHC.Name -> GHC.GRHSs GHC.RdrName (GHC.LHsExpr GHC.RdrName)
-                 -> [[GHC.HsExpr GHC.RdrName]]
-                 -> RefactGhc [[GHC.HsExpr GHC.RdrName]]
+       allParams :: GHC.Name -> GHC.GRHSs GhcPs (GHC.LHsExpr GhcPs)
+                 -> [[GHC.HsExpr GhcPs]]
+                 -> RefactGhc [[GHC.HsExpr GhcPs]]
        allParams pn rhs1 initial  -- pn: demoted function/pattern name.
         =do
             nm <- getRefactNameMap
@@ -1542,14 +1426,17 @@ foldParams pns match@(GHC.L l (GHC.Match _mfn _pats _mt rhs)) _decls demotedDecl
                       allParams pn rhs' (initial++[p])
               else return initial
         where
-           getOneParam :: (SYB.Data t) => NameMap -> GHC.Name -> t -> [GHC.HsExpr GHC.RdrName]
+           getOneParam :: (SYB.Data t) => NameMap -> GHC.Name -> t -> [GHC.HsExpr GhcPs]
            getOneParam nm pn1
-              = SYB.everythingStaged SYB.Renamer (++) []
-                   ([] `SYB.mkQ`  worker)
+              = SYB.everything (++) ([] `SYB.mkQ`  worker)
               -- =applyTU (stop_tdTU (failTU `adhocTU` worker))
                 where
-                  worker :: GHC.HsExpr GHC.RdrName -> [GHC.HsExpr GHC.RdrName]
+                  worker :: GHC.HsExpr GhcPs -> [GHC.HsExpr GhcPs]
+#if __GLASGOW_HASKELL__ >= 806
+                  worker (GHC.HsApp _ e1 e2)
+#else
                   worker (GHC.HsApp e1 e2)
+#endif
                    |(expToNameRdr nm e1 == Just pn1) = [GHC.unLoc e2]
                   worker _ = []
 
@@ -1560,9 +1447,13 @@ foldParams pns match@(GHC.L l (GHC.Match _mfn _pats _mt rhs)) _decls demotedDecl
              = do
                 -- _ <- clearRefactDone
                 nm <- getRefactNameMap
-                everywhereMStaged' SYB.Parser (SYB.mkM (worker nm)) t
+                everywhereM' (SYB.mkM (worker nm)) t
                 where
+#if __GLASGOW_HASKELL__ >= 806
+                  worker nm (GHC.L _ (GHC.HsApp _ e1 _e2 )) -- The param being removed is e2
+#else
                   worker nm (GHC.L _ (GHC.HsApp e1 _e2 )) -- The param being removed is e2
+#endif
                     |expToNameRdr nm e1 == Just pn1 = return e1
                   worker _ x = return x
 {-
@@ -1619,33 +1510,53 @@ foldParams pns match@(GHC.L l (GHC.Match _mfn _pats _mt rhs)) _decls demotedDecl
 
 
        -----------remove parameters in demotedDecls-------------------------------
-       rmParamsInDemotedDecls :: [GHC.Name] -> GHC.LHsBind GHC.RdrName
-                              -> RefactGhc (GHC.LHsBind GHC.RdrName)
+       rmParamsInDemotedDecls :: [GHC.Name] -> GHC.LHsBind GhcPs
+                              -> RefactGhc (GHC.LHsBind GhcPs)
        rmParamsInDemotedDecls ps bind
          -- =applyTP (once_tdTP (failTP `adhocTP` worker))
-         = SYB.everywhereMStaged SYB.Parser (SYB.mkM worker) bind
-            where worker :: GHC.Match GHC.RdrName (GHC.LHsExpr GHC.RdrName) -> RefactGhc (GHC.Match GHC.RdrName (GHC.LHsExpr GHC.RdrName))
+         = SYB.everywhereM (SYB.mkM worker) bind
+            where worker :: GHC.Match GhcPs (GHC.LHsExpr GhcPs) -> RefactGhc (GHC.Match GhcPs (GHC.LHsExpr GhcPs))
+#if __GLASGOW_HASKELL__ >= 806
+                  worker (GHC.Match x mfn' pats2 rhs1)
+#elif __GLASGOW_HASKELL__ >= 804
+                  worker (GHC.Match mfn' pats2 rhs1)
+#else
                   worker (GHC.Match mfn' pats2 typ rhs1)
+#endif
                     = do
                          nm <- getRefactNameMap
                          let pats'=filter (\x->not ((patToNameRdr nm x /= Nothing) &&
                                           elem (gfromJust "rmParamsInDemotedDecls" $ patToNameRdr nm x) ps)) pats2
+#if __GLASGOW_HASKELL__ >= 806
+                         return (GHC.Match x mfn' pats' rhs1)
+#elif __GLASGOW_HASKELL__ >= 804
+                         return (GHC.Match mfn' pats' rhs1)
+#else
                          return (GHC.Match mfn' pats' typ rhs1)
+#endif
 
        ----------remove parameters in the parent functions' rhs-------------------
-       rmParamsInParent :: GHC.Name -> [GHC.HsExpr GHC.RdrName]
-                        -> GHC.GRHSs GHC.RdrName (GHC.LHsExpr GHC.RdrName)
-                        -> RefactGhc (GHC.GRHSs GHC.RdrName (GHC.LHsExpr GHC.RdrName))
+       rmParamsInParent :: GHC.Name -> [GHC.HsExpr GhcPs]
+                        -> GHC.GRHSs GhcPs (GHC.LHsExpr GhcPs)
+                        -> RefactGhc (GHC.GRHSs GhcPs (GHC.LHsExpr GhcPs))
        rmParamsInParent pn es grhss = do
          nm <- getRefactNameMap
          -- =applyTP (full_buTP (idTP `adhocTP` worker))
-         SYB.everywhereMStaged SYB.Renamer (SYB.mkM (worker nm)) grhss
+         SYB.everywhereM (SYB.mkM (worker nm)) grhss
+#if __GLASGOW_HASKELL__ >= 806
+            where worker nm expr@(GHC.L _ (GHC.HsApp _ e1 e2))
+#else
             where worker nm expr@(GHC.L _ (GHC.HsApp e1 e2))
+#endif
                    | findNamesRdr nm [pn] e1 && (elem (showGhc (GHC.unLoc e2)) (map (showGhc) es))
                       = do
                        liftT $ transferEntryDPT expr e1
                        return e1
+#if __GLASGOW_HASKELL__ >= 806
+                  worker nm (expr@(GHC.L _ (GHC.HsPar _ e1)))
+#else
                   worker nm (expr@(GHC.L _ (GHC.HsPar e1)))
+#endif
                     |Just pn==expToNameRdr nm e1
                        = do
                          liftT $ transferEntryDPT expr e1
@@ -1654,7 +1565,7 @@ foldParams pns match@(GHC.L l (GHC.Match _mfn _pats _mt rhs)) _decls demotedDecl
 
 
        getClashedNames :: NameMap -> [GHC.Name] -> [GHC.Name]
-                       -> GHC.LMatch GHC.RdrName (GHC.LHsExpr GHC.RdrName)
+                       -> GHC.LMatch GhcPs (GHC.LHsExpr GhcPs)
                        -> RefactGhc [GHC.Name]
        getClashedNames nm oldNames newNames match'
          = do  let (_f,DN d) = hsFDsFromInsideRdr nm match'
@@ -1666,8 +1577,8 @@ foldParams pns match@(GHC.L l (GHC.Match _mfn _pats _mt rhs)) _decls demotedDecl
 
        ----- make Substitions between formal and actual parameters.-----------------
        mkSubst :: NameMap
-               -> [GHC.LPat GHC.RdrName] -> [[GHC.HsExpr GHC.RdrName]]
-               -> [(GHC.Name,GHC.HsExpr GHC.RdrName)]
+               -> [GHC.LPat GhcPs] -> [[GHC.HsExpr GhcPs]]
+               -> [(GHC.Name,GHC.HsExpr GhcPs)]
        mkSubst nm pats1 params
            = catMaybes (zipWith (\x y -> if (patToNameRdr nm x/=Nothing) && (length (nub $ map showGhc y)==1)
                                           then Just (gfromJust "mkSubst" $ patToNameRdr nm x,(ghead "mkSubst") y)
@@ -1675,18 +1586,18 @@ foldParams pns match@(GHC.L l (GHC.Match _mfn _pats _mt rhs)) _decls demotedDecl
 
 
 -- |substitute an old expression by new expression
-replaceExpWithUpdToks :: GHC.LHsBind GHC.RdrName -> (GHC.Name, GHC.HsExpr GHC.RdrName)
-                      -> RefactGhc (GHC.LHsBind GHC.RdrName)
+replaceExpWithUpdToks :: GHC.LHsBind GhcPs -> (GHC.Name, GHC.HsExpr GhcPs)
+                      -> RefactGhc (GHC.LHsBind GhcPs)
 replaceExpWithUpdToks  decls subst = do
   nm <- getRefactNameMap
   let
-    worker (e@(GHC.L l _)::GHC.LHsExpr GHC.RdrName)
+    worker (e@(GHC.L l _)::GHC.LHsExpr GhcPs)
       |(expToNameRdr nm e) == Just (fst subst)
           = return (GHC.L l (snd subst))
     worker x=return x
 
   -- = applyTP (full_buTP (idTP `adhocTP` worker)) decls
-  everywhereMStaged' SYB.Parser (SYB.mkM worker) decls
+  everywhereM' (SYB.mkM worker) decls
 
 -- | return True if pn is a local function/pattern name
 isLocalFunOrPatName :: SYB.Data t => NameMap -> GHC.Name -> t -> Bool

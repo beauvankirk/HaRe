@@ -13,12 +13,15 @@ import Digraph
 import FastString
 #endif
 import GHC
+import GhcMake
 import HscTypes
 import Panic
 
 
 -- Other imports
+#if __GLASGOW_HASKELL__ < 802
 import qualified Data.Map as Map
+#endif
 
 {-
 
@@ -70,12 +73,33 @@ getModulesAsGraph drop_hs_boot_nodes summaries mb_root_mod
             -- the specified node.
             let root | Just node <- lookup_node HsSrcFile root_mod, graph `hasVertexG` node = node
                      | otherwise = panic "module does not exist"
+#if __GLASGOW_HASKELL__ >= 804
+            in graphFromEdgedVerticesUniq (seq root (reachableG graph root))
+#elif __GLASGOW_HASKELL__ > 800
+            in graphFromEdgedVerticesUniq (seq root (reachableG graph root))
+#else
             in graphFromEdgedVertices (seq root (reachableG graph root))
-
+#endif
 
 
 
 -- ---------------------------------------------------------------------
+
+#if __GLASGOW_HASKELL__ >= 804
+#else
+summaryNodeKey :: SummaryNode -> Int
+summaryNodeKey (_, k, _) = k
+#endif
+
+summaryNodeSummary :: SummaryNode -> ModSummary
+#if __GLASGOW_HASKELL__ >= 804
+summaryNodeSummary (DigraphNode s _ _) = s
+#else
+summaryNodeSummary (s, _, _) = s
+#endif
+
+-- if !(defined(MIN_VERSION_GLASGOW_HASKELL) && (MIN_VERSION_GLASGOW_HASKELL(8,0,1,1)))
+#if __GLASGOW_HASKELL__ < 802
 -- This bit is from the GHC source >>>>>>>
 type SummaryNode = (ModSummary, Int, [Int])
 
@@ -99,15 +123,14 @@ topSortModuleGraph drop_hs_boot_nodes summaries mb_root_mod
             in graphFromEdgedVertices (seq root (reachableG graph root))
 -}
 
-summaryNodeKey :: SummaryNode -> Int
-summaryNodeKey (_, k, _) = k
-
-summaryNodeSummary :: SummaryNode -> ModSummary
-summaryNodeSummary (s, _, _) = s
 
 moduleGraphNodes :: Bool -> [ModSummary]
   -> (Graph SummaryNode, HscSource -> ModuleName -> Maybe SummaryNode)
+#if __GLASGOW_HASKELL__ > 800
+moduleGraphNodes drop_hs_boot_nodes summaries = (graphFromEdgedVerticesUniq nodes, lookup_node)
+#else
 moduleGraphNodes drop_hs_boot_nodes summaries = (graphFromEdgedVertices nodes, lookup_node)
+#endif
   where
     numbered_summaries = zip summaries [1..]
 
@@ -195,12 +218,6 @@ home_imps imps = [ ideclName i |  L _ i <- imps, isLocal (ideclPkgQual i) ]
   where isLocal Nothing = True
         isLocal (Just pkg) | pkg == fsLit "this" = True -- "this" is special
         isLocal _ = False
-#endif
-
-{-
-ms_home_allimps :: ModSummary -> [ModuleName]
-ms_home_allimps ms = map unLoc (ms_home_srcimps ms ++ ms_home_imps ms)
--}
 
 ms_home_srcimps :: ModSummary -> [Located ModuleName]
 #if __GLASGOW_HASKELL__ <= 710
@@ -216,4 +233,7 @@ ms_home_imps = home_imps . ms_imps
 ms_home_imps ms = map snd $ ms_imps ms
 #endif
 
+#endif
 -- GHC source end
+
+#endif

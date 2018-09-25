@@ -15,6 +15,7 @@ import Data.List
 import qualified GhcMod.Types as GM (mpModule)
 
 import Language.Haskell.GHC.ExactPrint.Utils
+import Language.Haskell.GHC.ExactPrint.Types
 import Language.Haskell.Refact.Refactoring.Renaming
 import Language.Haskell.Refact.Utils.GhcVersionSpecific
 import Language.Haskell.Refact.Utils.LocUtils
@@ -41,18 +42,18 @@ spec = do
   describe "locToExp on ParsedSource" $ do
     it "p:finds the largest leftmost expression contained in a given region #1" $ do
       t <- ct $ parsedFileGhc "./TypeUtils/B.hs"
-      let parsed = GHC.pm_parsed_source $ tmParsedModule t
+      let parsed = GHC.pm_parsed_source $ GHC.tm_parsed_module t
 
-      let (Just expr) = locToExp (7,7) (7,43) parsed :: Maybe (GHC.Located (GHC.HsExpr GHC.RdrName))
+      let (Just expr) = locToExp (7,7) (7,43) parsed :: Maybe (GHC.Located (GHC.HsExpr GhcPs))
       getLocatedStart expr `shouldBe` (7,9)
       getLocatedEnd   expr `shouldBe` (7,42)
 
     it "p:finds the largest leftmost expression contained in a given region #2" $ do
       -- ((_, _, mod), toks) <- parsedFileBGhc
       t <- ct $ parsedFileGhc "./TypeUtils/B.hs"
-      let modu = GHC.pm_parsed_source $ tmParsedModule t
+      let modu = GHC.pm_parsed_source $ GHC.tm_parsed_module t
 
-      let (Just expr) = locToExp (7,7) (7,41) modu :: Maybe (GHC.Located (GHC.HsExpr GHC.RdrName))
+      let (Just expr) = locToExp (7,7) (7,41) modu :: Maybe (GHC.Located (GHC.HsExpr GhcPs))
       getLocatedStart expr `shouldBe` (7,12)
       getLocatedEnd   expr `shouldBe` (7,19)
 
@@ -60,7 +61,7 @@ spec = do
       t <- ct $ parsedFileGhc "./TypeUtils/B.hs"
       let renamed = tmRenamedSource t
 
-      let (Just expr) = locToExp (7,7) (7,41) renamed :: Maybe (GHC.Located (GHC.HsExpr GHC.Name))
+      let (Just expr) = locToExp (7,7) (7,41) renamed :: Maybe (GHC.Located (GHC.HsExpr GhcRn))
       getLocatedStart expr `shouldBe` (7,12)
       getLocatedEnd   expr `shouldBe` (7,19)
 
@@ -70,24 +71,51 @@ spec = do
       t <- ct $ parsedFileGhc "./TypeUtils/B.hs"
       let renamed = tmRenamedSource t
 
-      let (Just expr) = locToExp (7,7) (7,43) renamed :: Maybe (GHC.Located (GHC.HsExpr GHC.Name))
+      let (Just expr) = locToExp (7,7) (7,43) renamed :: Maybe (GHC.Located (GHC.HsExpr GhcRn))
       getLocatedStart expr `shouldBe` (7,9)
       getLocatedEnd   expr `shouldBe` (7,42)
 
   -- -------------------------------------------------------------------
 
   describe "loading a file" $ do
+    it "loads a single file" $ do
+      t <- ct $ parsedFileGhc "./B.hs"
+
+      let parsed = GHC.pm_parsed_source $ GHC.tm_parsed_module t
+      (showGhc parsed) `shouldBe` "module B where\nbob :: Int -> Int -> Int\nbob x y = x + y"
+
+     -- ---------------------------------
+
+    it "loads the same file more than once" $ do
+      -- We are checking that loading via the GHC hook does not get defeated the
+      -- second time by the GHC recompile checker.
+      let testFileName = "./B.hs"
+      let
+        comp = do
+         parseSourceFileGhc testFileName
+         p1 <- getRefactParsed
+         parseSourceFileGhc testFileName
+         p2 <- getRefactParsed
+         return (p1,p2)
+      ((parsed1,parsed2),_s) <- ct $ runRefactGhc comp initialState testOptions
+      -- ((parsed1,parsed2),_s) <- ct $ runRefactGhc comp initialLogOnState testOptions
+
+      (showGhc parsed1) `shouldBe` "module B where\nbob :: Int -> Int -> Int\nbob x y = x + y"
+      (showGhc parsed2) `shouldBe` "module B where\nbob :: Int -> Int -> Int\nbob x y = x + y"
+
+     -- ---------------------------------
+
     it "loads a file having the LANGUAGE CPP pragma" $ do
       t <- ct $ parsedFileGhc "./BCpp.hs"
 
-      let parsed = GHC.pm_parsed_source $ tmParsedModule t
-      (showGhc parsed) `shouldBe` "module BCpp where\nbob :: Int -> Int -> Int\nbob x y = x + y"
+      let parsed = GHC.pm_parsed_source $ GHC.tm_parsed_module t
+      (showGhc parsed) `shouldBe` "module Main where\nbob :: Int -> Int -> Int\nbob x y = x + y\nmain = putStrLn \"hello\""
 
      -- ---------------------------------
     it "loads a file having a top comment and LANGUAGE CPP pragma" $ do
       t <- ct $ parsedFileGhc "./BCppTC.hs"
 
-      let parsed = GHC.pm_parsed_source $ tmParsedModule t
+      let parsed = GHC.pm_parsed_source $ GHC.tm_parsed_module t
       (showGhc parsed) `shouldBe` "module BCppTC where\nbob :: Int -> Int -> Int\nbob x y = x + y"
 
      -- ---------------------------------
@@ -103,19 +131,31 @@ spec = do
 
     -- ---------------------------------
 
-    it "loads a series of files based on cabal1" $ do
+    it "loads a series of files based on cabal1 1" $ do
 
-      currentDir <- getCurrentDirectory
-      setCurrentDirectory "./test/testdata/cabal/cabal1"
+      let dir = "./test/testdata/cabal/cabal1"
 
       let settings = defaultSettings { rsetEnabledTargets = (True,True,False,False)
                                      -- , rsetVerboseLevel = Debug
                                      }
 
-      r <- rename settings testOptions "./src/Foo/Bar.hs" "baz1" (3, 1)
-      -- r <- rename logTestSettings cradle "./src/Foo/Bar.hs" "baz1" (3, 1)
-      r' <- mapM makeRelativeToCurrentDirectory r
-      setCurrentDirectory currentDir
+      r <-  cdAndDo dir $ rename settings testOptions "./src/main.hs" "baz1" (7, 1)
+      r' <- cdAndDo dir $ mapM makeRelativeToCurrentDirectory r
+
+      (show r') `shouldBe` "[\"src/main.hs\"]"
+
+    -- ---------------------------------
+
+    it "loads a series of files based on cabal1 2" $ do
+
+      let dir = "./test/testdata/cabal/cabal1"
+
+      let settings = defaultSettings { rsetEnabledTargets = (True,True,False,False)
+                                     -- , rsetVerboseLevel = Debug
+                                     }
+
+      r <-  cdAndDo dir $ rename settings testOptions "./src/Foo/Bar.hs" "baz1" (3, 1)
+      r' <- cdAndDo dir $ mapM makeRelativeToCurrentDirectory r
 
       (show r') `shouldBe` "[\"src/Foo/Bar.hs\","
                           ++"\"src/main.hs\"]"
@@ -125,22 +165,14 @@ spec = do
 
     it "loads a series of files based on cabal2, which has 2 exe" $ do
 
-      currentDir <- getCurrentDirectory
-      setCurrentDirectory "./test/testdata/cabal/cabal2"
+      let dir = "./test/testdata/cabal/cabal2"
 
       let settings = defaultSettings { rsetEnabledTargets = (True,True,True,True)
                                      -- , rsetVerboseLevel = Debug
                                      }
 
-      let handler = [Handler handler1]
-          handler1 :: GHC.SourceError -> IO [String]
-          handler1 e = do
-             setCurrentDirectory currentDir
-             return [show e]
-
-      r <- catches (rename settings testOptions "./src/Foo/Bar.hs" "baz1" (3, 1)) handler
-      r' <- mapM makeRelativeToCurrentDirectory r
-      setCurrentDirectory currentDir
+      r  <- cdAndDo dir $ rename settings testOptions "./src/Foo/Bar.hs" "baz1" (3, 1)
+      r' <- cdAndDo dir $ mapM makeRelativeToCurrentDirectory r
 
 
       (show r') `shouldBe` "[\"src/Foo/Bar.hs\","++
@@ -337,6 +369,27 @@ spec = do
 -}
   -- -------------------------------------------------------------------
 
+  describe "generates a nameMap for a file" $ do
+    it "nameMap for B.hs" $ do
+      t <- ct $ parsedFileGhc "./B.hs"
+      let nm = initRdrNameMap t
+      (showGhc nm) `shouldBe` "[(B.hs:4:1-3, bob), (B.hs:4:8-10, Int), (B.hs:4:15-17, Int),\n (B.hs:4:22-24, Int), (B.hs:5:1-3, bob), (B.hs:5:5, x),\n (B.hs:5:7, y), (B.hs:5:11, x), (B.hs:5:13, +), (B.hs:5:15, y)]"
+
+    -- ---------------------------------
+
+    it "nameMap for Renaming/RenameInExportedType2.hs" $ do
+      t <- ct $ parsedFileGhc "./Renaming/RenameInExportedType2.hs"
+      let nm = initRdrNameMap t
+      -- putStrLn $ showAnnData mempty 0 (gfromJust "foo" $ GHC.tm_renamed_source t)
+      (showGhc nm) `shouldBe`
+        (  "[(Renaming/RenameInExportedType2.hs:3:3-8, MyType),\n"
+         ++" (Renaming/RenameInExportedType2.hs:3:11-12, NT),\n"
+         ++" (Renaming/RenameInExportedType2.hs:6:6-11, MyType),\n"
+         ++" (Renaming/RenameInExportedType2.hs:6:15-16, MT),\n"
+         ++" (Renaming/RenameInExportedType2.hs:6:18-20, Int),\n"
+         ++" (Renaming/RenameInExportedType2.hs:6:24-25, NT)]")
+
+  -- -------------------------------------------------------------------
   describe "sameOccurrence" $ do
     it "checks that a given syntax element is the same occurrence as another" $ do
       pending -- "write this test"
@@ -356,14 +409,14 @@ spec = do
   describe "getModuleName" $ do
     it "returns a string for the module name if there is one" $ do
       t <- ct $ parsedFileGhc "./TypeUtils/B.hs"
-      let modu = GHC.pm_parsed_source $ tmParsedModule t
+      let modu = GHC.pm_parsed_source $ GHC.tm_parsed_module t
 
       let (Just (_modname,modNameStr)) = getModuleName modu
       modNameStr `shouldBe` "TypeUtils.B"
 
     it "returns Nothing for the module name otherwise" $ do
       t <- ct $ parsedFileGhc "./NoMod.hs"
-      let modu = GHC.pm_parsed_source $ tmParsedModule t
+      let modu = GHC.pm_parsed_source $ GHC.tm_parsed_module t
       getModuleName modu `shouldBe` Nothing
 
   -- -------------------------------------------------------------------
@@ -402,8 +455,22 @@ spec = do
          g <- clientModsAndFiles tm
          return g
       (mg,_s) <- ct $ runRefactGhc comp initialState testOptions
+      -- (mg,_s) <- ct $ runRefactGhc comp initialLogOnState testOptions
       showGhc (map GM.mpModule mg) `shouldBe` "[Main]"
 
+    ------------------------------------
+
+    it "gets modules which directly or indirectly import a module #3" $ do
+      let dir = "./test/testdata/cabal/cabal1"
+      let
+        comp = do
+         parseSourceFileGhc "./src/Foo/Bar.hs"
+         tm <- getRefactTargetModule
+         g <- clientModsAndFiles tm
+         return g
+      (mg,_s) <- cdAndDo dir $ runRefactGhc comp initialState testOptions
+      -- (mg,_s) <- ct $ runRefactGhc comp initialLogOnState testOptions
+      showGhc (map GM.mpModule mg) `shouldBe` "[Main]"
     ------------------------------------
 
     it "gets modules which import a module in different cabal targets" $ do
@@ -450,6 +517,7 @@ spec = do
          g <- clientModsAndFiles tm
          return g
       (mg,_s) <- cdAndDo testDir $ runRefactGhc comp initialState testOptions
+      -- (mg,_s) <- cdAndDo testDir $ runRefactGhc comp initialLogOnState testOptions
       showGhc (map GM.mpModule mg) `shouldBe` "[]"
 
 
@@ -467,7 +535,7 @@ spec = do
       -- (mg,_s) <- runRefactGhc comp initialLogOnState testOptions
       show (sort $ map GM.mpModule mg) `shouldBe` "[ModuleName \"Language.Haskell.Refact.API\",ModuleName \"Language.Haskell.Refact.HaRe\",ModuleName \"Language.Haskell.Refact.Refactoring.Case\",ModuleName \"Language.Haskell.Refact.Refactoring.DupDef\",ModuleName \"Language.Haskell.Refact.Refactoring.MoveDef\",ModuleName \"Language.Haskell.Refact.Refactoring.Renaming\",ModuleName \"Language.Haskell.Refact.Refactoring.RoundTrip\",ModuleName \"Language.Haskell.Refact.Refactoring.SwapArgs\",ModuleName \"Language.Haskell.Refact.Refactoring.Simple\",ModuleName \"MoveDefSpec\",ModuleName \"Main\",ModuleName \"Main\",ModuleName \"CaseSpec\",ModuleName \"DupDefSpec\",ModuleName \"GhcUtilsSpec\",ModuleName \"RenamingSpec\",ModuleName \"RoundTripSpec\",ModuleName \"SimpleSpec\",ModuleName \"SwapArgsSpec\",ModuleName \"TypeUtilsSpec\",ModuleName \"UtilsSpec\"]"
     -}
-    pendingWith "make an equivalent test using testdata/cabal"
+      pendingWith "make an equivalent test using testdata/cabal"
 
   -- -------------------------------------------------------------------
 
@@ -539,7 +607,7 @@ spec = do
           return (pr,g)
 
       ( (t, mg), _s) <- ct $ runRefactGhc comp initialState testOptions
-      let parsed = GHC.pm_parsed_source $ tmParsedModule t
+      let parsed = GHC.pm_parsed_source $ GHC.tm_parsed_module t
 
       (show $ getModuleName parsed) `shouldBe` "Just (ModuleName \"S1\",\"S1\")"
       (sort $ map (showGhc . GM.mpModule) mg) `shouldBe` ["M2", "M3", "Main"]
@@ -556,7 +624,7 @@ spec = do
 
           return (pr,g)
       ((t, mg ), _s) <- ct $ runRefactGhc comp initialState testOptions
-      let parsed = GHC.pm_parsed_source $ tmParsedModule t
+      let parsed = GHC.pm_parsed_source $ GHC.tm_parsed_module t
 
       (show $ getModuleName parsed) `shouldBe` "Just (ModuleName \"S1\",\"S1\")"
       (sort $ map (showGhc . GM.mpModule) mg) `shouldBe` ["M2", "M3", "Main"]
@@ -573,9 +641,9 @@ spec = do
 
           return (pr,g)
       ((t, mg), _s) <- ct $ runRefactGhc comp  initialState testOptions
-      let parsed = GHC.pm_parsed_source $ tmParsedModule t
+      let parsed = GHC.pm_parsed_source $ GHC.tm_parsed_module t
       (show $ getModuleName parsed) `shouldBe` "Just (ModuleName \"DupDef.Dd1\",\"DupDef.Dd1\")"
-      showGhc (map GM.mpModule mg) `shouldBe` "[DupDef.Dd2, DupDef.Dd3]"
+      showGhc (map GM.mpModule mg) `shouldBe` "[DupDef.Dd2, DupDef.Dd3, Main, Main]"
 
 
   -- -------------------------------------------------------------------
@@ -588,7 +656,11 @@ spec = do
         parseSourceFileGhc "./TypeUtils/B.hs"
 
         g <- GHC.getModuleGraph
+#if __GLASGOW_HASKELL__ >= 804
+        gs <- mapM GHC.showModule $ GHC.mgModSummaries g
+#else
         gs <- mapM GHC.showModule g
+#endif
 
         put (s {rsUniqState = 100})
         return (show gs)
@@ -605,7 +677,11 @@ spec = do
         parseSourceFileGhc "./TypeUtils/B.hs"
 
         g <- GHC.getModuleGraph
+#if __GLASGOW_HASKELL__ >= 804
+        gs <- mapM GHC.showModule $ GHC.mgModSummaries g
+#else
         gs <- mapM GHC.showModule g
+#endif
 
         put (s {rsUniqState = 100})
         return (gs)
@@ -637,8 +713,8 @@ spec = do
   describe "directoryManagement" $ do
     it "loads a file from a sub directory" $ do
       t <- ct $ parsedFileGhc "./FreeAndDeclared/DeclareS.hs"
-      fileName <- canonicalizePath "./test/testdata/FreeAndDeclared/DeclareS.hs"
-      let parsed = GHC.pm_parsed_source $ tmParsedModule t
+      fileName <- makeAbsolute "./test/testdata/FreeAndDeclared/DeclareS.hs"
+      let parsed = GHC.pm_parsed_source $ GHC.tm_parsed_module t
       let
         comp = do
           parseSourceFileGhc fileName
