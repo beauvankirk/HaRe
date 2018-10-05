@@ -1,0 +1,53 @@
+resolver: nightly-2018-10-05
+name: snapshot-for-ghc-8.6.1
+
+packages:
+- brittany-0.11.0.0
+- git: https://github.com/beauvankirk/cabal.git
+  commit: 63102f5a284de6f1e18637942da789a51c97180e
+  subdirs:
+    # - Cabal
+    - cabal-install
+- git: https://github.com/beauvankirk/cabal-helper.git
+  commit: 430c82c1d86bc520c727f0f38703d7bd0e2ab4d4
+- git: https://github.com/beauvankirk/ghc-mod.git
+  commit: 0b975b88389f432d6fa400e4add167fe37e8f9ab
+  subdirs:
+    - '.'
+    - 'core'
+- git: https://github.com/beauvankirk/HTTP
+  commit: 0cde5812516e5deb507685ebfb1239009d36e5b8
+# - Cabal-2.4.0.1
+# - cabal-install-2.4.0.0
+- cabal-plan-0.4.0.0
+# - directory-1.3.3.1
+- integer-simple-0.1.1.1
+# - time-1.9.2
+- xhtml-3000.2.2.1
+- Win32-2.6.1.0
+- connection-0.2.8
+- cryptonite-0.25
+- tls-1.4.1
+- asn1-encoding-0.9.5
+- asn1-types-0.3.2
+- byteable-0.1.1
+- x509-1.7.4
+- x509-store-1.6.6
+- x509-system-1.6.6
+- x509-validation-1.6.10
+- asn1-parse-0.9.4
+- pem-0.2.4
+- fb-1.2.1
+- http-conduit-2.3.2
+- cryptohash-0.11.9
+- cryptohash-cryptoapi-0.1.4
+- cryptohash-sha256-0.11.101.0
+- hackage-security-0.5.3.0
+- syz-0.2.0.0
+- hlint-2.1.10
+- ed25519-0.0.5.0
+- cpphs-1.20.8
+- hslogger-1.2.12
+
+
+drop-packages:
