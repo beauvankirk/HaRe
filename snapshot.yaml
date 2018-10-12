@@ -1,8 +1,10 @@
-resolver: nightly-2018-10-05
+resolver: nightly-2018-10-10
 name: snapshot-for-ghc-8.6.1
 
 packages:
-- brittany-0.11.0.0
+# - brittany-0.11.0.0
+- git: https://github.com/beauvankirk/brittany.git
+  commit: 872d541554acdd648dcaab8dfb59c3c11c68208d
 - git: https://github.com/beauvankirk/cabal.git
   commit: 63102f5a284de6f1e18637942da789a51c97180e
   subdirs:
